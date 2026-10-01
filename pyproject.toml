@@ -1,0 +1,52 @@
+[project]
+name = "antigravity-swap"
+dynamic = ["version"]
+description = "Multi-account switcher for the Antigravity CLI (agy), with automatic rotation and quota-aware failover"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["antigravity", "agy", "gemini", "account-switcher", "cli"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/hrmasss/antigravity-swap"
+Repository = "https://github.com/hrmasss/antigravity-swap"
+Issues = "https://github.com/hrmasss/antigravity-swap/issues"
+
+[project.scripts]
+aswap = "antigravity_swap.cli:main"
+antigravity-swap = "antigravity_swap.cli:main"
+
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/antigravity_swap/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/antigravity_swap"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src", "tests", "README.md", "LICENSE", "pyproject.toml"]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
