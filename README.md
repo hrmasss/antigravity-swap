@@ -48,10 +48,13 @@ uv run aswap --help
 ### Updating
 
 ```bash
-uv tool upgrade antigravity-swap    # or: pipx upgrade antigravity-swap
+aswap upgrade                       # detects uv, pipx or the binary installer
+# or run your installer directly:
+uv tool install --force --refresh antigravity-swap
+pipx upgrade antigravity-swap
 ```
 
-For the binary, run the install line again.
+On Windows, `aswap upgrade` prints the command instead of running it, because Windows keeps `aswap.exe` locked while it runs.
 
 ## Usage
 
@@ -78,13 +81,26 @@ aswap list
 ```
 
 ```
-   #  account                  5h   week  3p 5h  3p wk  5h resets  checked
-*  1  you@example.com (home)   90%  44%   0%     0%     17:23      just now   limited until 17:13
-   2  work@example.com (work)  0%   0%    0%     0%     17:23      just now
-   3  side@example.com         0%   21%   0%     33%    17:23      just now
+Accounts:
+  1: you@example.com [home] (active)
+     ├ Gemini 5h:      23%   resets 13:42         in 4h 34m
+     ├ Gemini 7d:       5%   resets Oct 8 18:23   in 6d 9h
+     ├ Claude/GPT 5h:   0%   full
+     └ Claude/GPT 7d:  33%   resets Oct 6 14:06   in 4d 4h
+  2: work@example.com [work] (limited until 17:13, in 1h 2m)
+     ├ Gemini 5h:       0%   full
+     ├ Gemini 7d:      44%   resets Oct 5 13:02   in 3d 3h
+     ├ Claude/GPT 5h:   0%   full
+     └ Claude/GPT 7d:   0%   full
+
+Running instances:
+  ● TUI    ~/code/app      1: you@example.com [home]   (2 sessions)
+  ● print  ~/code/infra    2: work@example.com [work]  (1 session)
 ```
 
-Numbers are **used** percent per window. `5h` and `week` are the Gemini models; `3p` is Claude and GPT through agy, which agy meters separately. `*` marks the account plain `agy` uses now. `aswap list --refresh` forces fresh readings; `--cached` skips the network.
+Numbers are **used** percent per window, with when each window resets. agy meters two pools separately: the Gemini models, and Claude and GPT models through agy. `full` means nothing is used yet. `(active)` marks the account plain `agy` uses now. `aswap list --refresh` forces fresh readings, `--cached` skips the network, and `--table` prints one compact row per account.
+
+**Running instances** lists every agy session on the machine, grouped by working directory, with the account it runs on: a session in an aswap directory by its slot, one started with `--gemini_dir` by the login in that directory, and one on the default login by whichever account was active when it started. A session that started before the first switch aswap recorded shows as "account unknown".
 
 Readings come from the same endpoint the agy CLI uses. When an account's access token has expired, aswap renews it by running `agy models`, which lists models and spends no quota.
 
@@ -214,7 +230,23 @@ aswap import backup.json          # skips accounts that exist; --force replaces
 aswap purge                       # delete all aswap data
 ```
 
-Bare `aswap` is `aswap list`.
+Bare `aswap` is `aswap list`. `rm` is short for `remove`.
+
+### claude-swap flag spellings
+
+The flag forms from claude-swap work too, so muscle memory carries over:
+
+```bash
+aswap --list              # aswap list
+aswap --status            # aswap status
+aswap --switch            # aswap switch
+aswap --switch-to 2       # aswap switch 2
+aswap --add-account       # aswap add
+aswap --remove-account 2  # aswap remove 2
+aswap --disable-account 2 / --enable-account 2
+aswap --watch             # aswap watch (also --tui)
+aswap --export f / --import f / --upgrade / --auto / --refresh
+```
 
 ## Configuration
 
@@ -260,7 +292,7 @@ aswap config path
 }
 ```
 
-Rows may also carry `alias`, `disabled`, `limitedUntil` / `limitedReason`, `quarantined` / `quarantineReason`, and `usageError`.
+Rows may also carry `alias`, `disabled`, `limitedUntil` / `limitedReason`, `quarantined` / `quarantineReason`, and `usageError`. `list` and `status` also carry `runningInstances`: `pid`, `mode` (`TUI` or `print`), `cwd`, `accountNumber`, `startedAt`.
 
 ## How it works
 

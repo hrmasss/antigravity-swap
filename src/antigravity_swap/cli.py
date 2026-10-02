@@ -12,7 +12,7 @@ import sys
 import time
 from pathlib import Path
 
-from antigravity_swap import __version__, agy, auto, paths
+from antigravity_swap import __version__, agy, auto, paths, style, views
 from antigravity_swap.credentials import Credential, CredentialError, FileBackend
 from antigravity_swap.failover import ExecError, run_exec
 from antigravity_swap.fsutil import locked, write_atomic
@@ -162,13 +162,18 @@ def cmd_list(mgr, args):
                     continue
                 mgr.refresh_usage(reg, a, force=args.refresh, active=active)
         reg.save()
+    instances = views.instance_rows(mgr, reg, active)
     if args.json:
         now = time.time()
         print(json.dumps({"schemaVersion": SCHEMA, "activeAccountNumber": active.slot if active else None,
                           "backend": mgr.backend.name,
-                          "accounts": [account_row(mgr, a, active, now) for a in reg.ordered()]}, indent=2))
-    else:
+                          "accounts": [account_row(mgr, a, active, now) for a in reg.ordered()],
+                          "runningInstances": instances}, indent=2))
+    elif args.table:
         print_table(mgr, reg, active)
+    else:
+        views.print_tree(mgr, reg, active, sys.stdout)
+        views.print_instances(instances, sys.stdout)
     return 0
 
 
@@ -180,7 +185,8 @@ def cmd_status(mgr, args):
         payload = {"schemaVersion": SCHEMA, "backend": mgr.backend.name,
                    "signedIn": cred is not None, "managed": active is not None,
                    "email": cred.identity().email if cred else None,
-                   "activeAccountNumber": active.slot if active else None}
+                   "activeAccountNumber": active.slot if active else None,
+                   "runningInstances": views.instance_rows(mgr, reg, active)}
         if active:
             payload["account"] = account_row(mgr, active, active, time.time())
         print(json.dumps(payload, indent=2))
@@ -190,10 +196,8 @@ def cmd_status(mgr, args):
     elif active is None:
         print(f"Signed in as {cred.identity().email or 'unknown'}, not managed by aswap. Run: aswap add")
     else:
-        print(f"Account {active.slot}: {active.label}" + (f" ({active.alias})" if active.alias else ""))
-        f = _flags(active, time.time())
-        if f:
-            print(f"  {f}")
+        views.print_tree(mgr, reg, active, sys.stdout, only=active)
+    views.print_instances(views.instance_rows(mgr, reg, active), sys.stdout)
     return 0
 
 
@@ -217,9 +221,10 @@ def cmd_switch(mgr, args):
         return 0
     print(f"Switched to account {res.to.slot}: {res.to.label}"
           + ("" if res.verified is None else (" (login verified)" if res.verified else " (could not verify login)")))
-    running = agy.running_agy()
-    if running:
-        print(f"{len(running)} agy process(es) still running keep their old account until restarted. "
+    reg = Registry.load()
+    old = [r for r in views.instance_rows(mgr, reg, res.to) if r["accountNumber"] != res.to.slot]
+    if old:
+        print(f"{len(old)} running agy session(s) keep the account they started on until restarted. "
               f"Resume one with: agy -c")
     return 0
 
@@ -511,11 +516,35 @@ def cmd_watch(mgr, args):
             if sys.stdout.isatty():
                 sys.stdout.write("\033[2J\033[H")
             print(f"aswap watch  {time.strftime('%H:%M:%S')}  (every {args.interval:.0f}s, Ctrl-C stops)\n")
-            print_table(mgr, reg, active)
+            views.print_tree(mgr, reg, active, sys.stdout)
+            views.print_instances(views.instance_rows(mgr, reg, active), sys.stdout)
             sys.stdout.flush()
             time.sleep(args.interval)
     except KeyboardInterrupt:
         return 0
+
+
+def cmd_upgrade(mgr, args):
+    exe = sys.executable.replace("\\", "/").lower()
+    if getattr(sys, "frozen", False):
+        if os.name == "nt":
+            print("Standalone binary: download the latest aswap-windows-x86_64.exe from "
+                  "https://github.com/hrmasss/antigravity-swap/releases/latest")
+            return 0
+        cmd = ["sh", "-c", "curl -fsSL https://raw.githubusercontent.com/hrmasss/antigravity-swap/main/install.sh "
+               "| ASWAP_INSTALL_DIR=" + str(Path(sys.executable).parent) + " sh"]
+    elif "/uv/tools/" in exe:
+        cmd = ["uv", "tool", "install", "--force", "--refresh", "antigravity-swap"]
+    elif "/pipx/" in exe:
+        cmd = ["pipx", "upgrade", "antigravity-swap"]
+    else:
+        cmd = [sys.executable, "-m", "pip", "install", "-U", "antigravity-swap"]
+    if os.name == "nt" and cmd[0] != sys.executable:
+        print("Windows keeps aswap.exe locked while it runs. Run this yourself:")
+        print("  " + " ".join(cmd))
+        return 0
+    print("Running: " + " ".join(cmd), file=sys.stderr)
+    return subprocess.call(cmd)
 
 
 def cmd_purge(mgr, args):
@@ -552,6 +581,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--json", action="store_true")
     s.add_argument("--refresh", action="store_true", help="fetch fresh quota for every account")
     s.add_argument("--cached", action="store_true", help="no network; show the last readings")
+    s.add_argument("--table", action="store_true", help="one compact row per account")
 
     s = sub.add_parser("status", help="which account agy is using")
     s.add_argument("--json", action="store_true")
@@ -608,7 +638,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("name", nargs="?")
     s.add_argument("--unset", action="store_true")
 
-    s = sub.add_parser("remove", help="forget an account")
+    s = sub.add_parser("remove", aliases=["rm"], help="forget an account")
     s.add_argument("target")
 
     s = sub.add_parser("config", help="show or change settings")
@@ -634,6 +664,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("purge", help="delete all aswap data")
     s.add_argument("--yes", action="store_true")
+
+    sub.add_parser("upgrade", aliases=["update"], help="upgrade aswap itself")
     return p
 
 
@@ -642,8 +674,23 @@ COMMANDS = {
     "auto": cmd_auto, "watch": cmd_watch, "refresh": cmd_refresh, "disable": cmd_disable,
     "enable": cmd_enable, "limit": cmd_limit, "alias": cmd_alias, "remove": cmd_remove,
     "config": cmd_config, "export": cmd_export, "import": cmd_import, "map": cmd_map,
-    "unmap": cmd_unmap, "purge": cmd_purge,
+    "unmap": cmd_unmap, "purge": cmd_purge, "rm": cmd_remove, "upgrade": cmd_upgrade,
+    "update": cmd_upgrade,
 }
+
+# claude-swap's flag spellings, so muscle memory carries over: `aswap --list`, `--switch-to 2` ...
+LEGACY_FLAGS = {
+    "--list": "list", "--status": "status", "--add-account": "add", "--remove-account": "remove",
+    "--disable-account": "disable", "--enable-account": "enable", "--switch": "switch",
+    "--switch-to": "switch", "--export": "export", "--import": "import", "--watch": "watch",
+    "--tui": "watch", "--upgrade": "upgrade", "--auto": "auto", "--refresh": "refresh",
+}
+
+
+def translate_legacy(argv: list[str]) -> list[str]:
+    if argv and argv[0] in LEGACY_FLAGS:
+        return [LEGACY_FLAGS[argv[0]]] + argv[1:]
+    return argv
 PASSTHROUGH = {"run": cmd_run, "exec": cmd_exec}
 
 
@@ -653,6 +700,7 @@ def main(argv: list[str] | None = None) -> int:
     if "--" in argv:
         i = argv.index("--")
         argv, passthrough = argv[:i], argv[i + 1:]
+    argv = translate_legacy(argv)
     args = build_parser().parse_args(argv)
     cmd = args.cmd or "list"
     if args.cmd is None:

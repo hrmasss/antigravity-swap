@@ -11,7 +11,6 @@ from pathlib import Path
 
 from antigravity_swap import paths
 from antigravity_swap.credentials import FileBackend
-from antigravity_swap.paths import IS_MACOS, IS_WINDOWS
 from antigravity_swap.store import load_cred
 
 QUOTA_RE = re.compile(r"RESOURCE_EXHAUSTED|Individual quota reached|\bcode 429\b", re.I)
@@ -192,39 +191,3 @@ def newest_conversation(gdir: Path, since: float) -> str | None:
     if not dbs:
         return None
     return max(dbs, key=lambda p: p.stat().st_mtime).stem
-
-
-# --- running agy processes ----------------------------------------------------------------
-
-
-def running_agy() -> list[int]:
-    """PIDs of agy processes on this machine, best effort."""
-    me = os.getpid()
-    pids: list[int] = []
-    try:
-        if IS_WINDOWS:
-            r = subprocess.run(["tasklist", "/FO", "CSV", "/NH", "/FI", "IMAGENAME eq agy.exe"],
-                               capture_output=True, text=True, timeout=10)
-            for line in r.stdout.splitlines():
-                parts = [p.strip('"') for p in line.split('","')]
-                if len(parts) > 1 and parts[0].lower() == "agy.exe" and parts[1].isdigit():
-                    pids.append(int(parts[1]))
-        elif IS_MACOS:
-            r = subprocess.run(["ps", "-axo", "pid=,comm="], capture_output=True, text=True, timeout=10)
-            for line in r.stdout.splitlines():
-                pid, _, comm = line.strip().partition(" ")
-                if Path(comm.strip()).name == "agy" and pid.isdigit():
-                    pids.append(int(pid))
-        else:
-            for p in Path("/proc").iterdir():
-                if not p.name.isdigit():
-                    continue
-                try:
-                    argv0 = (p / "cmdline").read_bytes().split(b"\0", 1)[0]
-                except OSError:
-                    continue
-                if Path(argv0.decode(errors="replace")).name == "agy":
-                    pids.append(int(p.name))
-    except (OSError, subprocess.SubprocessError):
-        return []
-    return [p for p in pids if p != me]

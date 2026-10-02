@@ -41,6 +41,8 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_AGY_LOG", str(log))
     monkeypatch.setenv("ASWAP_AGY", FAKE)
     monkeypatch.setenv("ASWAP_BACKEND", "file")
+    from antigravity_swap import style
+    monkeypatch.setattr(style, "_enabled", None)
 
     class Env:
         pass

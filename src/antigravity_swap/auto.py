@@ -158,7 +158,8 @@ def tick(mgr: Manager, policy: Policy) -> Tick:
             reg.save()
             return Tick(Outcome.ERROR, events + [_ev("error", message=str(e))])
         reg.save()
-    write_json(paths.state_file(), {**state, "last_switch": now})
+    fresh = read_json(paths.state_file(), default={}) or {}  # switch() appended to its log meanwhile
+    write_json(paths.state_file(), {**fresh, "last_switch": now})
     return Tick(Outcome.SWITCHED, events + [_ev("switch", frm=_ref(active), to=_ref(target), reason=reason,
                                                   verified=res.verified)])
 

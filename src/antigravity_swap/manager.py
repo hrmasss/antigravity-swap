@@ -156,6 +156,7 @@ class Manager:
                                       f"switched back. It is quarantined until you re-add it.")
                 if check.ok:
                     capture(target.slot, self.current_login())
+        record_switch(target.slot)
         return SwitchResult(True, prev, target, "switched", verified)
 
     def _freshest(self, acct: Account) -> Credential | None:
@@ -304,6 +305,30 @@ class Manager:
                 return (u is None, wr if wr is not None else float("inf"), u or 0, a.slot)
             return min(room, key=key)[0]
         return min(scored, key=lambda item: (item[1] is None, item[1] or 0, item[0].slot))[0]
+
+
+SWITCH_LOG_LEN = 200
+
+
+def record_switch(slot: int, when: float | None = None) -> None:
+    """Remember when the default login changed, so running sessions can be attributed."""
+    st = read_json(paths.state_file(), default={}) or {}
+    log = st.get("switches") or []
+    log.append({"ts": when or time.time(), "slot": slot})
+    st["switches"] = log[-SWITCH_LOG_LEN:]
+    write_json(paths.state_file(), st)
+
+
+def default_account_at(ts: float | None, current_slot: int | None) -> int | None:
+    """Which slot the default login was at time ``ts``. None when it cannot be known."""
+    log = (read_json(paths.state_file(), default={}) or {}).get("switches") or []
+    if ts is None:
+        return current_slot if not log else None
+    later = [e for e in log if e["ts"] > ts]
+    if not later:
+        return current_slot
+    earlier = [e for e in log if e["ts"] <= ts]
+    return earlier[-1]["slot"] if earlier else None
 
 
 def with_registry(fn):
