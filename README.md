@@ -241,7 +241,7 @@ aswap config path
 | `exec.limit_fallback_hours` | `5` | hold time when a quota error names no reset |
 | `usage.max_age_seconds` | `300` | readings older than this are re-fetched |
 | `usage.renew` | `true` | renew expired tokens with `agy models` before reading quota |
-| `agy.path` | (PATH) | the agy binary to use |
+| `agy.path` | (PATH) | the agy binary to use; the `ASWAP_AGY` environment variable overrides it |
 
 ## JSON output
 

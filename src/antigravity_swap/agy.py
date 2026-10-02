@@ -27,8 +27,8 @@ class AgyNotFound(Exception):
 
 
 def find_agy(configured: str = "") -> list[str]:
-    """The command that runs agy, as an argv prefix."""
-    cand = configured or os.environ.get("ASWAP_AGY", "")
+    """The command that runs agy, as an argv prefix. ``ASWAP_AGY`` beats ``agy.path``."""
+    cand = os.environ.get("ASWAP_AGY", "") or configured
     if cand:
         if Path(cand).suffix == ".py":
             import sys
