@@ -50,6 +50,11 @@ def main(argv):
         print("gemini-3.8-flash-high\tGemini 3.8 Flash (High)")
         return 0
 
+    interactive = not any(a in ("-p", "--print", "--prompt") for a in rest)
+    log_file = next((a.split("=", 1)[1] for a in rest if a.startswith("--log-file=")), None)
+    if interactive:
+        return interactive_session(rest, gdir, email, behaviour, log_file)
+
     if behaviour == "dead":
         print("Authentication required. Please visit the URL to log in:", file=sys.stderr)
         time.sleep(30)  # agy waits for a pasted code; aswap must kill it
@@ -74,6 +79,38 @@ def main(argv):
     turns = db.read_text().count("turn by")
     print(json.dumps({"conversation_id": conv, "status": "SUCCESS",
                       "response": f"done by {email} after {turns} turn(s)\n"}))
+    return 0
+
+
+def interactive_session(rest, gdir, email, behaviour, log_file):
+    """TUI stand-in: logs like agy, and on 'quota' hangs until it is killed, as agy does."""
+    log = open(log_file, "a") if log_file else open(os.devnull, "w")
+    conv = rest[rest.index("--conversation") + 1] if "--conversation" in rest else str(uuid.uuid4())
+    cdir = gdir / "antigravity-cli" / "conversations"
+    cdir.mkdir(parents=True, exist_ok=True)
+    if "--conversation" in rest and not (cdir / f"{conv}.db").is_file():
+        print("conversation not found")
+        return 1
+    with open(cdir / f"{conv}.db", "a") as fh:
+        fh.write(f"turn by {email}\n")
+    log.write(("I1002 resolver.go:85] Resuming conversation " if "--conversation" in rest
+               else "I1002 server.go:1248] Created conversation ") + conv + "\n")
+    log.flush()
+    if behaviour == "quota":
+        log.write("I1002 run.go:371] Run: attempt 1 failed (RESOURCE_EXHAUSTED (code 429): Individual quota "
+                  "reached. Please upgrade your subscription to increase your limits. Resets in 0h30m0s.), "
+                  "retrying in 1s\n")
+        log.flush()
+        time.sleep(0.5)
+        log.write("E1002 errorreport.go:223] agent executor error: calling model: RESOURCE_EXHAUSTED (code 429): "
+                  "Individual quota reached. Please upgrade your subscription to increase your limits. "
+                  "Resets in 0h30m0s.\n")
+        log.flush()
+        time.sleep(60)  # a TUI does not exit on a quota error
+        return 0
+    prompt = rest[rest.index("-i") + 1] if "-i" in rest else None
+    turns = (cdir / f"{conv}.db").read_text().count("turn by")
+    print(f"session by {email} conv={conv} turns={turns} prompt={prompt!r}")
     return 0
 
 

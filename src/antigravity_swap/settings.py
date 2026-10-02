@@ -10,6 +10,17 @@ from antigravity_swap.fsutil import read_json, write_json
 
 STRATEGIES = ("best", "consume-first")
 PICK_STRATEGIES = ("rotate", "best", "next-available", "consume-first")
+# Plain-English names for the same strategies; either spelling works anywhere.
+STRATEGY_ALIASES = {"most-quota": "best", "round-robin": "rotate", "soonest-reset": "consume-first"}
+# Keys that were renamed; a value saved under the old name still counts.
+RENAMED = {"failover.strategy": "exec.strategy", "failover.max_hops": "exec.max_hops",
+           "failover.resume_prompt": "exec.resume_prompt",
+           "failover.limit_fallback_hours": "exec.limit_fallback_hours"}
+
+
+def strategy(name: str) -> str:
+    """Canonical strategy name for ``name`` or one of its aliases."""
+    return STRATEGY_ALIASES.get(name, name)
 POOLS = ("gemini", "3p", "all")
 
 
@@ -39,14 +50,18 @@ KEYS: dict[str, Key] = {k.name: k for k in [
         "Which quota pool drives decisions: gemini, 3p (Claude/GPT through agy) or all.", choices=POOLS),
     Key("switch.verify", True, bool,
         "After a switch, run `agy models` to prove the login works (no quota is spent)."),
-    Key("exec.strategy", "best", str, "How `aswap exec` picks the next account.", choices=PICK_STRATEGIES),
-    Key("exec.max_hops", 0, int, "Most account changes in one exec run; 0 means every account once.",
+    Key("run.failover", True, bool,
+        "aswap run watches the session; when the account hits its quota, agy restarts on the next "
+        "account and continues the same conversation."),
+    Key("failover.strategy", "best", str,
+        "How run and exec pick the next account: best (most-quota), rotate (round-robin), "
+        "next-available, consume-first (soonest-reset).", choices=PICK_STRATEGIES),
+    Key("failover.max_hops", 0, int, "Most account changes in one run; 0 means every account once.",
         lambda v: v >= 0),
-    Key("exec.resume_prompt",
-        "You were interrupted by a usage limit and are now running on a different account. "
-        "Continue the task exactly where you stopped. Do not restart finished steps.",
+    Key("failover.resume_prompt",
+        "Please continue where you left off.",
         str, "Prompt sent when a conversation continues on the next account."),
-    Key("exec.limit_fallback_hours", 5.0, float,
+    Key("failover.limit_fallback_hours", 5.0, float,
         "How long to hold an account out when a quota error carries no reset time.", lambda v: v > 0),
     Key("usage.max_age_seconds", 300.0, float,
         "Quota readings older than this are re-fetched by list/auto.", lambda v: v >= 0),
@@ -60,6 +75,8 @@ KEYS: dict[str, Key] = {k.name: k for k in [
 
 
 def _coerce(key: Key, value: Any) -> Any:
+    if key.name.endswith(".strategy") and isinstance(value, str):
+        value = strategy(value)
     if key.kind is bool:
         if isinstance(value, bool):
             return value
@@ -93,24 +110,27 @@ class Settings:
 
     def get(self, name: str) -> Any:
         key = KEYS[name]
-        if name in self.values:
+        stored = name if name in self.values else RENAMED.get(name)
+        if stored in self.values:
             try:
-                return _coerce(key, self.values[name])
+                return _coerce(key, self.values[stored])
             except ValueError:
                 return key.default
         return key.default
 
     def is_default(self, name: str) -> bool:
-        return name not in self.values
+        return name not in self.values and RENAMED.get(name) not in self.values
 
     def set(self, name: str, value: Any) -> Any:
         if name not in KEYS:
             raise KeyError(name)
         v = _coerce(KEYS[name], value)
         self.values[name] = v
+        self.values.pop(RENAMED.get(name, ""), None)
         return v
 
     def unset(self, name: str) -> None:
         if name not in KEYS:
             raise KeyError(name)
         self.values.pop(name, None)
+        self.values.pop(RENAMED.get(name, ""), None)

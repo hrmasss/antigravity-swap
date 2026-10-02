@@ -15,9 +15,11 @@ from pathlib import Path
 from antigravity_swap import __version__, agy, auto, paths, style, views
 from antigravity_swap.credentials import Credential, CredentialError, FileBackend
 from antigravity_swap.failover import ExecError, run_exec
+from antigravity_swap.supervise import run_interactive
 from antigravity_swap.fsutil import locked, write_atomic
 from antigravity_swap.manager import Manager, SwitchError, with_registry
 from antigravity_swap.settings import KEYS, PICK_STRATEGIES, POOLS, STRATEGIES, Settings
+from antigravity_swap.settings import strategy as strategy_name
 from antigravity_swap.store import Registry, StoreError, capture, load_cred, save_cred
 from antigravity_swap.usage import WINDOW_ORDER, windows
 
@@ -247,6 +249,12 @@ def cmd_run(mgr, args, passthrough):
         target = reg.resolve(args.target)
     else:
         target = _mapped(reg, Path.cwd())
+    if mgr.settings.get("run.failover") and not args.no_failover and reg.accounts:
+        try:
+            return run_interactive(mgr, passthrough, target=str(target.slot) if target else None,
+                                   strategy=args.strategy, share_history=args.share_history)
+        except ExecError as e:
+            raise CliError(str(e)) from None
     active = mgr.active(reg)
     if target is None:
         return _run_plain(mgr, passthrough)
@@ -588,30 +596,37 @@ def build_parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("switch", help="change the account plain agy uses")
     s.add_argument("target", nargs="?", help="number, email or alias; omit to rotate")
-    s.add_argument("--strategy", choices=PICK_STRATEGIES, default="rotate",
+    s.add_argument("--strategy", type=strategy_name, choices=PICK_STRATEGIES, default="rotate",
                    help="how to pick when no target is given (default: rotate)")
     s.add_argument("--pool", choices=POOLS, help="quota pool for best / next-available / consume-first")
     s.add_argument("--no-verify", action="store_true", help="skip the `agy models` login check")
     s.add_argument("--force", action="store_true", help="rewrite even if already active; allow quarantined")
     s.add_argument("--json", action="store_true")
 
-    s = sub.add_parser("run", help="run agy as one account in this terminal only (Linux)")
-    s.add_argument("target", nargs="?", help="number, email or alias; omit to use the directory mapping")
+    s = sub.add_parser("run", help="run agy here; when the account runs out, continue on the next one")
+    s.add_argument("target", nargs="?",
+                   help="number, email or alias; omit for the directory mapping or the active account")
+    s.add_argument("--strategy", type=strategy_name, choices=PICK_STRATEGIES, metavar="STRATEGY",
+                   help="best (most-quota), rotate (round-robin), next-available, "
+                        "consume-first (soonest-reset); default: failover.strategy")
+    s.add_argument("--no-failover", action="store_true",
+                   help="plain session on one account, no quota watching")
     s.add_argument("--share-history", action="store_true", help="share conversations with your default agy")
     s.add_argument("--no-share", action="store_true", help="stop sharing conversations for this account")
     s.add_argument("--require-session", action="store_true",
                    help="refuse instead of running plain agy when the target is the default login")
 
     s = sub.add_parser("exec", help="run an agy -p task; on a quota error, continue it on the next account")
-    s.add_argument("target", nargs="?", help="account to start on (default: picked by exec.strategy)")
-    s.add_argument("--strategy", choices=PICK_STRATEGIES)
+    s.add_argument("target", nargs="?", help="account to start on (default: picked by failover.strategy)")
+    s.add_argument("--strategy", type=strategy_name, choices=PICK_STRATEGIES, metavar="STRATEGY",
+                   help="best (most-quota), rotate (round-robin), next-available, consume-first (soonest-reset)")
     s.add_argument("--max-hops", type=int, help="most account changes (default: every account once)")
 
     s = sub.add_parser("auto", help="switch automatically before the active account runs out")
     s.add_argument("--threshold", type=float, help="used %% that triggers a switch (default 90)")
     s.add_argument("--interval", type=float, help="seconds between checks (default 60)")
     s.add_argument("--cooldown", type=float, help="seconds between proactive switches (default 300)")
-    s.add_argument("--strategy", choices=STRATEGIES)
+    s.add_argument("--strategy", type=strategy_name, choices=STRATEGIES)
     s.add_argument("--pool", choices=POOLS)
     s.add_argument("--once", action="store_true",
                    help="one check; exit 0 switched, 1 error, 2 nothing to do, 3 blocked")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -124,12 +125,35 @@ def prepare_session(slot: int, share_history: bool = False, default_gdir: Path |
     if (default_gdir / "config").is_dir():
         shutil.copytree(default_gdir / "config", sdir / "config", dirs_exist_ok=True)
     _link(dcli / "skills", scli / "skills")
+    _carry_onboarding(dcli, scli)
     for name in SHARED_HISTORY:
         if share_history:
             _share(dcli / name, scli / name)
         else:
             _unshare(scli / name)
     return sdir
+
+
+def _carry_onboarding(dcli: Path, scli: Path) -> None:
+    """A session directory that only ever ran print mode has never finished agy's first-run
+    screens, so its TUI would open on the theme picker instead of the conversation. The
+    choices made there live server-side per account; the local file only records that the
+    screens were done. Copy that record from the default directory when it says so."""
+    src = dcli / "cache" / "onboarding.json"
+    dst = scli / "cache" / "onboarding.json"
+    try:
+        done = json.loads(src.read_text(encoding="utf-8")).get("onboardingComplete") is True
+    except (OSError, ValueError):
+        return
+    if not done:
+        return
+    try:
+        if json.loads(dst.read_text(encoding="utf-8")).get("onboardingComplete") is True:
+            return
+    except (OSError, ValueError):
+        pass
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(src, dst)
 
 
 def _link(src: Path, dst: Path) -> None:

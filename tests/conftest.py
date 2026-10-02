@@ -41,8 +41,14 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("FAKE_AGY_LOG", str(log))
     monkeypatch.setenv("ASWAP_AGY", FAKE)
     monkeypatch.setenv("ASWAP_BACKEND", "file")
-    from antigravity_swap import style
+    from antigravity_swap import manager, style
+    from antigravity_swap.usage import UsageError
     monkeypatch.setattr(style, "_enabled", None)
+
+    def offline(token, project=None):
+        raise UsageError("network", "tests never reach Google")
+
+    monkeypatch.setattr(manager, "fetch", offline)
 
     class Env:
         pass

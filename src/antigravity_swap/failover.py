@@ -145,9 +145,9 @@ def _run(cmd: list[str], mode: str, err: TextIO, out: TextIO) -> tuple[int, str,
 def run_exec(mgr: Manager, agy_args: list[str], target: str | None = None, strategy: str | None = None,
              max_hops: int | None = None, out: TextIO = sys.stdout, err: TextIO = sys.stderr) -> int:
     p = plan(agy_args)
-    strategy = strategy or mgr.settings.get("exec.strategy")
-    resume_prompt = mgr.settings.get("exec.resume_prompt")
-    fallback = float(mgr.settings.get("exec.limit_fallback_hours")) * 3600
+    strategy = strategy or mgr.settings.get("failover.strategy")
+    resume_prompt = mgr.settings.get("failover.resume_prompt")
+    fallback = float(mgr.settings.get("failover.limit_fallback_hours")) * 3600
     cmd0 = mgr.agy_cmd()
 
     def say(msg: str) -> None:
@@ -164,7 +164,7 @@ def run_exec(mgr: Manager, agy_args: list[str], target: str | None = None, strat
         say("no account is available (all disabled, quarantined or limited). See: aswap list")
         return EXHAUSTED_EXIT
     total = len(Registry.load().accounts)
-    max_hops = max_hops if max_hops is not None else int(mgr.settings.get("exec.max_hops"))
+    max_hops = max_hops if max_hops is not None else int(mgr.settings.get("failover.max_hops"))
     max_hops = max_hops or total
     tried: set[int] = set()
     hops = 0
@@ -243,7 +243,7 @@ def run_exec(mgr: Manager, agy_args: list[str], target: str | None = None, strat
             _emit(p["mode"], result, stdout, out)
             return _exhausted(say)
         if hops >= max_hops:
-            say(f"stopped after {hops} account change(s) (exec.max_hops)")
+            say(f"stopped after {hops} account change(s) (failover.max_hops)")
             _emit(p["mode"], result, stdout, out)
             return EXHAUSTED_EXIT
         prev_dir = gdir
@@ -272,8 +272,22 @@ def _flag(slot: int, limited: tuple[float, str] | None = None, quarantine: str |
 
 
 def _next(mgr: Manager, strategy: str, pool: str, tried: set[int], after: int):
-    """The next account, counting on from the one that just failed when rotating."""
-    return with_registry(lambda reg: mgr.pick(reg, strategy, pool, current=reg.get(after), exclude=tried))
+    """The next account, counting on from the one that just failed when rotating.
+
+    Quota readings for the candidates are refreshed first (when older than
+    usage.max_age_seconds), so "most quota left" is judged on current numbers.
+    """
+    def fn(reg):
+        if strategy != "rotate":
+            active = mgr.active(reg)
+            for a in reg.ordered():
+                if a.slot not in tried and a.rotatable():
+                    try:
+                        mgr.refresh_usage(reg, a, active=active)
+                    except Exception:
+                        pass  # a failed read keeps the last-known numbers
+        return mgr.pick(reg, strategy, pool, current=reg.get(after), exclude=tried)
+    return with_registry(fn)
 
 
 def _exhausted(say) -> int:

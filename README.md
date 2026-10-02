@@ -120,11 +120,11 @@ aswap switch work@example.com
 aswap switch work                 # by alias, once set with `aswap alias 2 work`
 ```
 
-Or let aswap choose: `aswap switch --strategy best` (most quota left), `--strategy next-available` (skip spent accounts), `--strategy consume-first` (weekly window that resets soonest).
+Or let aswap choose: `aswap switch --strategy most-quota`, `round-robin`, `next-available` or `soonest-reset` (see [Strategies](#strategies)).
 
 After writing the new login, aswap runs `agy models` to prove it works. If the login was revoked, aswap switches back, quarantines that account, and tells you to re-add it.
 
-**New agy launches use the new account. A session that is already running keeps the account it started with**, because agy holds its token in memory. Restart it to move it over; `agy -c` resumes the last conversation.
+**New agy launches use the new account. A session that is already running keeps the account it started with**, because agy holds its token in memory. Sessions started with `aswap run` move to the next account on their own when they run out.
 
 ### Automatic switching
 
@@ -156,39 +156,39 @@ For cron, `--once` reports in its exit code: `0` switched, `1` error, `2` nothin
 
 </details>
 
-### Long tasks that survive a quota limit: `aswap exec`
+### Keep a session going when an account runs out: `aswap run`
 
-Some agy limits never show in the quota numbers: an account can read 100% left and still stop mid-run with `RESOURCE_EXHAUSTED (code 429): Individual quota reached ... Resets in 4h42m2s`. `aswap exec` handles that case:
-
-```bash
-aswap exec -- -p "migrate the tests to pytest" --dangerously-skip-permissions
-aswap exec work -- -p "..."                     # start on a specific account
-aswap exec --strategy rotate --max-hops 3 -- -p "..."
-```
-
-Everything after `--` goes to agy. When the run stops on a quota error, aswap:
-
-1. holds that account out until the reset time in the error (or `exec.limit_fallback_hours` if there is none),
-2. picks the next account (`exec.strategy`, default `best`),
-3. copies the conversation to that account and resumes it with `agy --conversation <id>` and a short "continue where you stopped" prompt (`exec.resume_prompt`).
-
-A conversation is a local file, so the next account sees the whole history. Before each hop aswap checks the login with `agy models`; an account whose login is dead is quarantined and skipped instead of stalling on a sign-in prompt.
-
-Output: with no `--output-format`, you get the final response as plain text. `--output-format json` gives agy's JSON; `stream-json` streams through. Exit code is agy's, or `3` when every account is spent.
-
-On platforms where agy has one login per machine (see below), `exec` changes the default login as it hops, and says so.
-
-### Run accounts side by side: `aswap run` (Linux)
+Start agy through aswap instead of directly:
 
 ```bash
-aswap run 2                       # agy as account 2, in this terminal only
-aswap run work -- -c              # everything after -- goes to agy
-aswap run 2 --share-history       # share conversations with your default agy
+aswap run                          # the active account, in this terminal
+aswap run work                     # start on a specific account
+aswap run -- --model claude-sonnet-4-6 --dangerously-skip-permissions   # everything after -- goes to agy
 ```
 
-Each account gets its own agy directory under aswap's data folder, with your settings, MCP config and skills mirrored from `~/.gemini` on every launch. When the session ends, the token agy renewed is saved back. Running the account that is already your default login just launches plain `agy`; `--require-session` refuses instead.
+When the account hits its quota mid-session, aswap:
 
-Bind a directory to an account and a bare `aswap run` there picks it:
+1. holds that account out until the reset time agy reports (`Resets in 4h42m2s`), or `failover.limit_fallback_hours` if none is given,
+2. picks the next account by `failover.strategy` (default `best`: the most quota left, read fresh at that moment),
+3. stops agy, copies the conversation to the next account, and starts agy again with `--conversation <id> -i "Please continue where you left off."`.
+
+The conversation is a local file, so the next account has the whole history and picks up the task. You see agy restart in the same terminal and carry on. If no other account is free, aswap leaves the session alone and tells you.
+
+**Why a restart, and not a swap under the running session like claude-swap?** Claude Code re-reads its credentials file, so claude-swap can change account in place. agy keeps its login in memory for the life of the process; replacing the file under a running agy does nothing (tested). Restarting on the same conversation is the closest equivalent.
+
+aswap watches agy's log for the final quota error. agy retries a quota error a couple of times first ("attempt 1 failed ... retrying"), and those retries never trigger a switch. Only the error that ends the turn does.
+
+To make it the default, alias it:
+
+```bash
+alias agy='aswap run --'          # bash/zsh; agy -c becomes aswap run -- -c
+```
+
+`aswap run --no-failover` (or `aswap config set run.failover false`) runs a plain session on one account.
+
+**Where each account runs.** On Linux each account other than the default login gets its own agy directory under aswap's data folder, with your settings, MCP config, skills and finished first-run setup mirrored from `~/.gemini` on every launch, so several accounts run side by side. On Windows and keyring platforms agy has one login per machine, so a hop switches the default login, and says so.
+
+Bind a directory to an account and a bare `aswap run` there starts on it:
 
 ```bash
 aswap map 2 ~/work/client-app
@@ -196,6 +196,33 @@ cd ~/work/client-app && aswap run   # account 2
 aswap map                           # list bindings
 aswap unmap ~/work/client-app
 ```
+
+`--share-history` shares conversations between an account's directory and your default agy.
+
+### Print-mode tasks: `aswap exec`
+
+The same failover for `agy -p` runs, for scripts and unattended work:
+
+```bash
+aswap exec -- -p "migrate the tests to pytest" --dangerously-skip-permissions
+aswap exec work -- -p "..."                     # start on a specific account
+aswap exec --strategy round-robin --max-hops 3 -- -p "..."
+```
+
+Before each hop aswap checks the login with `agy models`; an account whose login is dead is quarantined and skipped instead of stalling on a sign-in prompt. Output: with no `--output-format`, you get the final response as plain text; `json` gives agy's JSON; `stream-json` streams through. Exit code is agy's, or `3` when every account is spent. `aswap run -- -p "..."` does the same thing.
+
+### Strategies
+
+One set of strategies everywhere a next account is picked (`switch --strategy`, `run`, `exec`, `auto`). Either name works:
+
+| Strategy | Also called | Picks |
+|---|---|---|
+| `best` | `most-quota` | the account with the most quota left in the pool you are using. **Default** for `run`, `exec` and `auto`. |
+| `rotate` | `round-robin` | the next account by number after the current one. Default for a bare `aswap switch`. |
+| `next-available` | | the next account by number that still has quota |
+| `consume-first` | `soonest-reset` | among accounts with room, the one whose weekly window resets soonest, so quota that is about to reset gets used first |
+
+Accounts that are disabled, quarantined or held out after a quota error are never picked. The pool follows the model: `--model claude-*` or `gpt-*` judges the Claude/GPT quota, anything else the Gemini quota.
 
 ## Platform support
 
@@ -205,7 +232,8 @@ Where agy keeps its login decides what is possible:
 |---|---|---|---|
 | Login lives in | `~/.gemini/antigravity-cli/antigravity-oauth-token` | Credential Manager, `gemini:antigravity` | system keyring |
 | `add`, `list`, `switch`, `auto`, `exec` | yes | yes | experimental |
-| `run` (two accounts at once) | yes | no | no |
+| `run` with failover | yes | yes (switches the default login) | yes |
+| two accounts at once | yes | no | no |
 | Quota for non-active accounts | always | yes, by a brief login swap (below) | yes, by a brief login swap |
 
 On Windows and keyring platforms the login is global: `agy --gemini_dir` changes where conversations go, not which account signs in. So one account is active per machine.
@@ -269,10 +297,11 @@ aswap config path
 | `autoswitch.strategy` | `best` | `best` or `consume-first` |
 | `autoswitch.pool` | `gemini` | `gemini`, `3p` or `all` |
 | `switch.verify` | `true` | prove each new login with `agy models` |
-| `exec.strategy` | `best` | `rotate`, `best`, `next-available`, `consume-first` |
-| `exec.max_hops` | `0` | most account changes per run; `0` is every account once |
-| `exec.resume_prompt` | (built in) | prompt sent when a conversation moves to the next account |
-| `exec.limit_fallback_hours` | `5` | hold time when a quota error names no reset |
+| `run.failover` | `true` | `aswap run` restarts on the next account when one runs out |
+| `failover.strategy` | `best` | how `run` and `exec` pick the next account (see Strategies) |
+| `failover.max_hops` | `0` | most account changes per run; `0` is every account once |
+| `failover.resume_prompt` | `Please continue where you left off.` | sent when a conversation moves to the next account |
+| `failover.limit_fallback_hours` | `5` | hold time when a quota error names no reset |
 | `usage.max_age_seconds` | `300` | readings older than this are re-fetched |
 | `usage.renew` | `true` | renew expired tokens with `agy models` before reading quota |
 | `usage.renew_inactive` | `true` | on single-login platforms, renew other accounts by a brief login swap |
