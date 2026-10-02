@@ -2,7 +2,7 @@
 
 Multi-account switcher for the Antigravity CLI (`agy`). Switch between Google accounts without signing out, let `aswap` switch for you before an account runs out, see every account's quota in one table, and run long print-mode tasks that carry on to the next account when one hits its limit.
 
-Modeled on [claude-swap](https://github.com/realiti4/claude-swap): same commands, same defaults where they make sense for agy.
+Inspired by [claude-swap](https://github.com/realiti4/claude-swap) by Onur Cetinkol, which does the same for Claude Code. The command set, the defaults and the auto-switch design come from it; see [Credits](#credits).
 
 ## Installation
 
@@ -357,6 +357,18 @@ uv tool uninstall antigravity-swap    # or: pipx uninstall antigravity-swap
 
 - The Antigravity CLI (`agy`), signed in
 - Python 3.12+ (not needed for the standalone binary)
+
+## Credits
+
+antigravity-swap is an independent project for a different CLI, but its shape is borrowed from [claude-swap](https://github.com/realiti4/claude-swap) by Onur Cetinkol ([@realiti4](https://github.com/realiti4)), MIT licensed. Concepts taken from it:
+
+- the commands and their spellings (`add`, `list`, `switch`, `run`, `auto`, `disable`, `alias`, `export`, and the `--list` / `--switch-to` flag forms)
+- session mode: one account per terminal without touching the default login
+- the auto-switch policy: a threshold on the binding window, hysteresis so accounts never ping-pong, a cooldown, and the `best` and `consume-first` strategies
+- capturing a renewed token back before every switch, and quarantining logins that stop working
+- the `list` layout with per-window usage, reset times and running instances, and the `--json` contract with `schemaVersion`
+
+No code was copied; agy's login, quota and session model are different enough that everything is written for it. Thank you to the claude-swap authors.
 
 ## License
 
