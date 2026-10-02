@@ -1,3 +1,3 @@
 """antigravity-swap: multi-account switcher for the Antigravity CLI (agy)."""
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"

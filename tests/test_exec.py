@@ -83,3 +83,11 @@ def test_limited_accounts_are_not_picked(env):
     reg.save()
     rc, out, err = run(env, ["-p", "x"], strategy="rotate")
     assert "done by b@x.io" in out
+
+
+def test_rotate_continues_after_the_failed_account(env):
+    env.plan({"a@x.io": "ok", "b@x.io": "quota", "c@x.io": "ok"})
+    add_accounts(env, "a@x.io", "b@x.io", "c@x.io")
+    rc, out, err = run(env, ["-p", "x"], target="2", strategy="rotate")
+    assert rc == 0
+    assert "done by c@x.io" in out

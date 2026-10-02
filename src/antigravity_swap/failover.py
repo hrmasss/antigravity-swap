@@ -190,7 +190,7 @@ def run_exec(mgr: Manager, agy_args: list[str], target: str | None = None, strat
             reason = "login rejected" if check.kind == "signin" else "account needs verification"
             _flag(acct.slot, quarantine=reason)
             say(f"account {acct.slot} ({acct.label}): {reason}; quarantined")
-            nxt = _next(mgr, strategy, p["pool"], tried)
+            nxt = _next(mgr, strategy, p["pool"], tried, acct.slot)
             if nxt is None:
                 return _exhausted(say)
             acct = nxt
@@ -238,7 +238,7 @@ def run_exec(mgr: Manager, agy_args: list[str], target: str | None = None, strat
             _flag(acct.slot, quarantine=reason)
             say(f"account {acct.slot} ({acct.label}): {reason}; quarantined")
         hops += 1
-        nxt = _next(mgr, strategy, p["pool"], tried)
+        nxt = _next(mgr, strategy, p["pool"], tried, acct.slot)
         if nxt is None:
             _emit(p["mode"], result, stdout, out)
             return _exhausted(say)
@@ -271,8 +271,9 @@ def _flag(slot: int, limited: tuple[float, str] | None = None, quarantine: str |
     with_registry(fn)
 
 
-def _next(mgr: Manager, strategy: str, pool: str, tried: set[int]):
-    return with_registry(lambda reg: mgr.pick(reg, strategy, pool, exclude=tried))
+def _next(mgr: Manager, strategy: str, pool: str, tried: set[int], after: int):
+    """The next account, counting on from the one that just failed when rotating."""
+    return with_registry(lambda reg: mgr.pick(reg, strategy, pool, current=reg.get(after), exclude=tried))
 
 
 def _exhausted(say) -> int:
