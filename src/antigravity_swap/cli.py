@@ -710,6 +710,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         mgr = Manager()
+        if sys.stderr.isatty():
+            mgr.on_swap = lambda a: print(style.dim(f"aswap: renewing {a.alias or a.label}'s login"),
+                                          file=sys.stderr, flush=True)
         if cmd in PASSTHROUGH:
             return PASSTHROUGH[cmd](mgr, args, passthrough)
         return COMMANDS[cmd](mgr, args)

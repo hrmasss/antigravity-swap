@@ -52,6 +52,9 @@ KEYS: dict[str, Key] = {k.name: k for k in [
         "Quota readings older than this are re-fetched by list/auto.", lambda v: v >= 0),
     Key("usage.renew", True, bool,
         "Renew expired access tokens with `agy models` before reading quota (no quota is spent)."),
+    Key("usage.renew_inactive", True, bool,
+        "Where agy has one global login (Windows), renew other accounts by swapping their login "
+        "in for the few seconds `agy models` takes. Off: their quota goes stale after about an hour."),
     Key("agy.path", "", str, "Path to the agy binary. Empty: find it on PATH."),
 ]}
 

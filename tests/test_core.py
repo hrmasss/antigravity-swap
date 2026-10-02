@@ -230,3 +230,26 @@ def test_auto_once_switches(env, monkeypatch):
     t = auto.tick(mgr, auto.Policy())
     assert t.outcome == auto.Outcome.SWITCHED
     assert env.backend.read().identity().email == "b@x.io"
+
+
+def test_renew_inactive_by_swap_on_global_login(env, monkeypatch):
+    """Windows-style single login: an expired non-active account is renewed and the default restored."""
+    from antigravity_swap import manager
+    from antigravity_swap.credentials import FileBackend
+    from antigravity_swap.store import save_cred
+
+    class GlobalBackend(FileBackend):
+        isolates_sessions = False
+
+    env.plan({"a@x.io": "ok", "b@x.io": "ok"})
+    mgr, reg = add_accounts(env, "a@x.io", "b@x.io")
+    mgr.backend = GlobalBackend(env.gdir)
+    env.login("a@x.io")
+    save_cred(2, make_cred("b@x.io", expiry_in=-60))
+    seen = []
+    monkeypatch.setattr(manager, "fetch", lambda tok, project=None: seen.append(tok) or reading(g5=5))
+    rec = mgr.refresh_usage(reg, reg.get(2), force=True, active=reg.get(1))
+    assert rec["status"] == "ok"
+    assert seen == ["renewed-b@x.io"]
+    assert load_cred(2).access_token == "renewed-b@x.io"
+    assert env.backend.read().identity().email == "a@x.io"  # default login is back

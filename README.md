@@ -206,9 +206,11 @@ Where agy keeps its login decides what is possible:
 | Login lives in | `~/.gemini/antigravity-cli/antigravity-oauth-token` | Credential Manager, `gemini:antigravity` | system keyring |
 | `add`, `list`, `switch`, `auto`, `exec` | yes | yes | experimental |
 | `run` (two accounts at once) | yes | no | no |
-| Quota for non-active accounts | always | until its token expires (~1h after last use) | until its token expires |
+| Quota for non-active accounts | always | yes, by a brief login swap (below) | yes, by a brief login swap |
 
-On Windows and keyring platforms the login is global: `agy --gemini_dir` changes where conversations go, not which account signs in. So one account is active per machine, and only the active one can renew its token. Force a backend with `ASWAP_BACKEND=file|wincred|keychain|secret-service`.
+On Windows and keyring platforms the login is global: `agy --gemini_dir` changes where conversations go, not which account signs in. So one account is active per machine.
+
+Access tokens last about an hour. To keep every account's quota fresh there, aswap renews an expired non-active account by putting its login in place for the few seconds `agy models` takes (no quota is spent), saving the renewed token, and putting your login back, all under aswap's lock. Running agy sessions are not affected, since they hold their token in memory. An agy you launch during those seconds would start on the borrowed account. Turn it off with `aswap config set usage.renew_inactive false`; non-active accounts then show `token expired` an hour after their last use. Force a backend with `ASWAP_BACKEND=file|wincred|keychain|secret-service`.
 
 Tested against agy 1.2.x on Linux and Windows. macOS and desktop-keyring support follow how agy's keyring library stores the login and have not been tested on real machines yet; reports welcome.
 
@@ -273,6 +275,7 @@ aswap config path
 | `exec.limit_fallback_hours` | `5` | hold time when a quota error names no reset |
 | `usage.max_age_seconds` | `300` | readings older than this are re-fetched |
 | `usage.renew` | `true` | renew expired tokens with `agy models` before reading quota |
+| `usage.renew_inactive` | `true` | on single-login platforms, renew other accounts by a brief login swap |
 | `agy.path` | (PATH) | the agy binary to use; the `ASWAP_AGY` environment variable overrides it |
 
 ## JSON output

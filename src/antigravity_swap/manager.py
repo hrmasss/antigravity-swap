@@ -42,6 +42,7 @@ class Manager:
         self.gdir = paths.gemini_dir()
         self.backend = backend or default_backend(self.gdir)
         self._agy: list[str] | None = None
+        self.on_swap = None  # callback(account) before a renew-by-swap, for progress output
 
     # -- basics -----------------------------------------------------------------------
 
@@ -251,6 +252,10 @@ class Manager:
             check = agy.check_login(cmd, sdir)
             cred = FileBackend(sdir).read()
             capture(acct.slot, cred)
+        elif self.settings.get("usage.renew_inactive"):
+            check, cred = self._renew_by_swap(cmd, acct)
+            if check is None:
+                return load_cred(acct.slot), True, ("no_login", "no stored login")
         else:
             return load_cred(acct.slot), True, ("token_expired", "only the active login renews on this platform")
         if not check.ok:
@@ -260,6 +265,33 @@ class Manager:
                 return cred, True, ("dead_login", check.message)
             return cred, True, ("unavailable", check.message or check.kind)
         return cred, True, None
+
+    def _renew_by_swap(self, cmd: list[str], acct: Account):
+        """Renew a non-active account where agy has one global login (Windows, keyrings).
+
+        The account's login goes in for the few seconds `agy models` takes, then the
+        original comes back. Running sessions are unaffected (they hold their token in
+        memory). The renewed login is kept only if it is still this account, so a
+        running session that happens to write its own token meanwhile is never saved
+        into the wrong slot.
+        """
+        stored = load_cred(acct.slot)
+        if stored is None:
+            return None, None
+        before = self.current_login()
+        if self.on_swap:
+            self.on_swap(acct)
+        try:
+            self.backend.write(stored)
+            check = agy.check_login(cmd, self.gdir)
+            after = self.current_login()
+        finally:
+            if before is not None:
+                self.backend.write(before)
+        if after is not None and after.identity().matches(acct.email, acct.sub):
+            capture(acct.slot, after)
+            return check, after
+        return check, stored
 
     def refresh_all(self, reg: Registry, force: bool = False) -> None:
         active = self.active(reg)
