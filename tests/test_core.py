@@ -4,7 +4,7 @@ import time
 import pytest
 
 from antigravity_swap import agy
-from antigravity_swap.credentials import parse_rfc3339
+from antigravity_swap.credentials import Credential, parse_rfc3339
 from antigravity_swap.fsutil import write_json
 from antigravity_swap.manager import SwitchError
 from antigravity_swap.settings import Settings
@@ -101,6 +101,22 @@ def test_add_updates_instead_of_duplicating(env):
     assert len(reg.accounts) == 2
     assert load_cred(1).access_token == "new-token"
 
+
+
+def test_add_reads_email_only_login(env):
+    # agy 1.4.9+ drops the id_token JWT and writes id_token_email instead
+    mgr, reg = add_accounts(env, "a@example.com")
+    data = json.loads(make_cred("a@example.com", access="new-format").raw)
+    del data["id_token"]
+    data["id_token_email"] = "a@example.com"
+    env.backend.write(Credential(json.dumps(data)))
+    acct, what = mgr.add(reg)
+    assert (acct.slot, what) == (1, "updated")
+    assert load_cred(1).access_token == "new-format"
+    data["id_token_email"] = "c@example.com"
+    env.backend.write(Credential(json.dumps(data)))
+    acct, what = mgr.add(reg)
+    assert (acct.slot, acct.email, acct.sub, what) == (2, "c@example.com", None, "added")
 
 def test_resolve(env):
     mgr, reg = add_accounts(env, "a@example.com", "b@example.com")

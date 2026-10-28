@@ -5,6 +5,9 @@ agy keeps one JSON blob per login::
     {"token": {"access_token", "token_type", "refresh_token", "expiry"},
      "auth_method": "...", "id_token": "<JWT>"}
 
+agy 1.4.9 and later write ``"id_token_email": "<email>"`` in place of the JWT, so there is no
+``sub`` to match on; the email alone names the account.
+
 Where the blob lives depends on the platform:
 
 * Linux without a desktop keyring: a 0600 file, ``<gemini_dir>/antigravity-cli/antigravity-oauth-token``.
@@ -88,7 +91,8 @@ class Credential:
 
     def identity(self) -> Identity:
         claims = jwt_claims(self.data.get("id_token"))
-        return Identity(email=claims.get("email"), sub=claims.get("sub"))
+        email = claims.get("email") or self.data.get("id_token_email") or None
+        return Identity(email=email, sub=claims.get("sub"))
 
     def newer_than(self, other: "Credential | None") -> bool:
         if other is None:

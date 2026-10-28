@@ -27,9 +27,12 @@ def main(argv):
     plan = json.loads(Path(os.environ["FAKE_AGY_PLAN"]).read_text())
     try:
         cred = json.loads(tok_path.read_text())
-        payload = cred["id_token"].split(".")[1]
-        payload += "=" * (-len(payload) % 4)
-        email = json.loads(base64.urlsafe_b64decode(payload))["email"]
+        if "id_token_email" in cred:
+            email = cred["id_token_email"]
+        else:
+            payload = cred["id_token"].split(".")[1]
+            payload += "=" * (-len(payload) % 4)
+            email = json.loads(base64.urlsafe_b64decode(payload))["email"]
     except Exception:
         cred, email = None, None
     behaviour = plan.get(email or "", "dead")

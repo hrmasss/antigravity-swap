@@ -90,7 +90,7 @@ class Manager:
                 raise StoreError("agy is not signed in. Run agy, sign in, then: aswap add")
         ident = cred.identity()
         if not ident.email and not ident.sub:
-            raise StoreError("this login carries no identity (no id_token); sign in again with agy")
+            raise StoreError("this login names no account (no id_token or id_token_email); sign in again with agy")
         existing = reg.find_identity(ident)
         if existing and (slot is None or slot == existing.slot):
             save_cred(existing.slot, cred)
