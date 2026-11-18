@@ -263,6 +263,50 @@ class MacKeychainBackend(Backend):
             raise CredentialError(f"security add-generic-password failed: {r.stderr.strip()}")
 
 
+class KeyringPoolBackend(Backend):
+    """Pool credentials in the Linux Secret Service (GNOME Keyring / libsecret).
+
+    This is the *pool* backend. It is **not** the same thing as :class:`SecretServiceBackend`
+    (which mirrors agy's own global login) and it never falls back to a plaintext file:
+
+    * ``ASWAP_BACKEND=secret-service`` selects it explicitly;
+    * detection only *offers* it — a missing or locked keyring raises :class:`CredentialError`
+      with an actionable message instead of quietly writing a 0600 file;
+    * the registry keeps slot/email/alias only; the token blob lives solely in the keyring item.
+
+    Session isolation is impossible here for the same reason as Windows: agy reads one login.
+    ``isolates_sessions`` is therefore False and ``run`` refuses concurrent slots, exactly as it
+    does on the global-login backends.
+    """
+
+    name = "secret-service"
+    isolates_sessions = False
+
+    def read(self) -> Credential | None:
+        from antigravity_swap import secretstore
+
+        try:
+            raw = secretstore.get(self.slot)
+        except secretstore.KeyringEntryMissing:
+            return None
+        except secretstore.KeyringUnavailable as exc:
+            raise CredentialError(f"Secret Service unavailable: {exc}") from None
+        return Credential(raw)
+
+    def write(self, cred: Credential) -> None:
+        from antigravity_swap import secretstore
+
+        try:
+            secretstore.store(self.slot, cred.raw)
+        except secretstore.KeyringUnavailable as exc:
+            raise CredentialError(f"Secret Service unavailable: {exc}") from None
+        except ValueError as exc:
+            raise CredentialError(f"refusing to store credential: {exc}") from None
+
+    def __init__(self, slot: int = 0):
+        self.slot = slot
+
+
 class SecretServiceBackend(Backend):
     """Experimental. Desktop Linux keyring via secret-tool, with go-keyring's attributes."""
 
@@ -298,10 +342,20 @@ def default_backend(gdir: Path) -> Backend:
     forced = os.environ.get("ASWAP_BACKEND", "").strip().lower()
     if forced:
         table = {"file": lambda: fb, "wincred": WindowsBackend, "keychain": MacKeychainBackend,
-                 "secret-service": SecretServiceBackend}
+                 "secret-service": KeyringPoolBackend}
         if forced not in table:
             raise CredentialError(f"ASWAP_BACKEND must be one of: {', '.join(table)}")
-        return table[forced]()
+        backend = table[forced]()
+        if forced == "secret-service":
+            # Explicit opt-in still refuses to operate on a broken keyring. Say so, loudly.
+            from antigravity_swap import secretstore
+
+            info = secretstore.probe()
+            if not info.available:
+                raise CredentialError(
+                    f"ASWAP_BACKEND=secret-service requested but the keyring is unusable: {info.detail}. "
+                    f"Either fix the keyring or run with ASWAP_BACKEND=file (plaintext, 0600, explicit).")
+        return backend
     if IS_WINDOWS:
         return WindowsBackend()
     if fb.path.exists():

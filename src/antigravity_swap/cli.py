@@ -12,11 +12,12 @@ import sys
 import time
 from pathlib import Path
 
-from antigravity_swap import __version__, agy, auto, paths, style, views
+from antigravity_swap import __version__, agy, auto, convstore, paths, slotlock, style, views
 from antigravity_swap.credentials import Credential, CredentialError, FileBackend
 from antigravity_swap.failover import ExecError, run_exec
 from antigravity_swap.supervise import run_interactive
 from antigravity_swap.fsutil import locked, write_atomic
+from antigravity_swap.locks_view import cmd_locks
 from antigravity_swap.manager import Manager, SwitchError, with_registry
 from antigravity_swap.settings import KEYS, PICK_STRATEGIES, POOLS, STRATEGIES, Settings
 from antigravity_swap.settings import strategy as strategy_name
@@ -570,6 +571,31 @@ def cmd_purge(mgr, args):
 # --- parser ------------------------------------------------------------------------------
 
 
+def cmd_wal_check(mgr, args):
+    """Verify a conversation database (and its WAL) without modifying anything."""
+    gdir = Path(args.gemini_dir).expanduser() if args.gemini_dir else mgr.gdir
+    db = paths.cli_dir(gdir) / "conversations" / f"{args.conversation}.db"
+    if not db.is_file():
+        raise CliError(f"no conversation {args.conversation} in {db.parent}")
+    import sqlite3
+
+    from antigravity_swap.convstore import _conn_uri, _conv_present, _step_count
+
+    with sqlite3.connect(_conn_uri(db), uri=True) as c:
+        integrity = c.execute("pragma integrity_check").fetchone()[0]
+        steps = _step_count(c)
+        conv_ok = _conv_present(c, args.conversation)
+        jm = c.execute("pragma journal_mode").fetchone()[0]
+    wal = Path(str(db) + "-wal")
+    print(json.dumps({
+        "conversation": args.conversation, "path": str(db),
+        "journalMode": jm, "integrity": integrity, "steps": steps,
+        "conversationIdPresent": conv_ok,
+        "walBytes": wal.stat().st_size if wal.is_file() else 0,
+    }, indent=2))
+    return 0 if integrity == "ok" else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="aswap",
@@ -680,6 +706,13 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("purge", help="delete all aswap data")
     s.add_argument("--yes", action="store_true")
 
+    s = sub.add_parser("locks", help="show per-slot writer locks")
+    s.add_argument("--json", action="store_true")
+
+    s = sub.add_parser("wal-check", help="verify a conversation database and its WAL")
+    s.add_argument("conversation", help="conversation id")
+    s.add_argument("--gemini-dir", dest="gemini_dir", default="", help="agy directory holding it")
+
     sub.add_parser("upgrade", aliases=["update"], help="upgrade aswap itself")
     return p
 
@@ -690,7 +723,7 @@ COMMANDS = {
     "enable": cmd_enable, "limit": cmd_limit, "alias": cmd_alias, "remove": cmd_remove,
     "config": cmd_config, "export": cmd_export, "import": cmd_import, "map": cmd_map,
     "unmap": cmd_unmap, "purge": cmd_purge, "rm": cmd_remove, "upgrade": cmd_upgrade,
-    "update": cmd_upgrade,
+    "update": cmd_upgrade, "locks": cmd_locks, "wal-check": cmd_wal_check,
 }
 
 # claude-swap's flag spellings, so muscle memory carries over: `aswap --list`, `--switch-to 2` ...

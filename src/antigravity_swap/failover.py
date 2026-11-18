@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import TextIO
 
-from antigravity_swap import agy
+from antigravity_swap import agy, convstore, errors, slotlock
 from antigravity_swap.credentials import FileBackend
 from antigravity_swap.manager import Manager, SwitchError, with_registry
 from antigravity_swap.store import Registry, capture
@@ -174,49 +174,41 @@ def run_exec(mgr: Manager, agy_args: list[str], target: str | None = None, strat
 
     while True:
         tried.add(acct.slot)
-        if mgr.isolates:
-            gdir = agy.prepare_session(acct.slot, default_gdir=mgr.gdir)
-        else:
-            gdir = mgr.gdir
-            try:
-                res = with_registry(lambda reg: mgr.switch(reg, reg.get(acct.slot), verify=False))
-            except SwitchError as e:
-                say(str(e))
-                return 1
-            if res.switched:
-                say(f"default login is now account {acct.slot} ({acct.label})")
-        check = agy.check_login(cmd0, gdir)
-        if not check.ok and check.kind in ("signin", "verify"):
-            reason = "login rejected" if check.kind == "signin" else "account needs verification"
-            _flag(acct.slot, quarantine=reason)
-            say(f"account {acct.slot} ({acct.label}): {reason}; quarantined")
+        try:
+            # The lock covers everything that touches this slot's directory: prepare_session
+            # symlink/token placement, the `agy models` probe and the turn itself.
+            with slotlock.held(acct.slot, wait=False, reason="exec"):
+                outcome = _exec_on_slot(mgr, acct, args, conv_id, prev_dir, p, cmd0, resume_prompt,
+                                        say, out, err, strategy)
+        except slotlock.SlotBusy as exc:
+            say(str(exc))
             nxt = _next(mgr, strategy, p["pool"], tried, acct.slot)
             if nxt is None:
                 return _exhausted(say)
+            if hops >= max_hops:
+                say(f"stopped after {hops} account change(s) (failover.max_hops)")
+                return EXHAUSTED_EXIT
+            hops += 1
+            prev_dir = None
             acct = nxt
             continue
-        if not mgr.isolates:
-            capture(acct.slot, mgr.current_login())
-        else:
-            capture(acct.slot, FileBackend(gdir).read())
 
-        run_args = args
-        if conv_id:
-            if prev_dir is not None and not agy.copy_conversation(conv_id, prev_dir, gdir):
-                say(f"conversation {conv_id} was not found on disk; starting the prompt over")
-                conv_id = None
-            else:
-                run_args = resume_args(args, conv_id, resume_prompt)
-        say(f"running on account {acct.slot} ({acct.label})" + (f", continuing {conv_id}" if conv_id else ""))
-        started = time.time()
-        try:
-            rc, stdout, stderr, streamed = _run(cmd0 + agy.dir_args(gdir) + run_args, p["mode"], err, out)
-        except KeyboardInterrupt:
-            _capture_dir(mgr, acct.slot, gdir)
-            return 130
-        _capture_dir(mgr, acct.slot, gdir)
+        if outcome["next"] is not None:
+            nxt = outcome["next"]
+            if nxt is None:
+                return _exhausted(say)
+            if hops >= max_hops:
+                say(f"stopped after {hops} account change(s) (failover.max_hops)")
+                return EXHAUSTED_EXIT
+            hops += 1
+            conv_id, prev_dir = outcome.get("conv_id"), outcome.get("gdir")
+            acct = nxt
+            continue
+
+        rc, stdout, stderr, streamed = outcome["rc"], outcome["stdout"], outcome["stderr"], outcome["streamed"]
+        gdir = outcome["gdir"]
         result = last_json(stdout)
-        conv_id = (result or {}).get("conversation_id") or streamed or agy.newest_conversation(gdir, started) or conv_id
+        conv_id = (result or {}).get("conversation_id") or streamed or agy.newest_conversation(gdir, outcome["started"]) or conv_id
         status = (result or {}).get("status")
         blob = stdout + "\n" + stderr
         failed = rc != 0 or (status is not None and str(status).upper() != "SUCCESS")
@@ -248,6 +240,69 @@ def run_exec(mgr: Manager, agy_args: list[str], target: str | None = None, strat
             return EXHAUSTED_EXIT
         prev_dir = gdir
         acct = nxt
+
+
+def _exec_on_slot(mgr: Manager, acct, args, conv_id, prev_dir, p, cmd0, resume_prompt,
+                  say, out, err, strategy: str) -> dict:
+    """Prepare, probe and run one account. Caller holds that slot's lock."""
+    gdir = agy.prepare_session(acct.slot, default_gdir=mgr.gdir) if mgr.isolates else mgr.gdir
+    if not mgr.isolates:
+        try:
+            res = with_registry(lambda reg: mgr.switch(reg, reg.get(acct.slot), verify=False))
+        except SwitchError as e:
+            say(str(e))
+            return {"rc": 1, "stdout": "", "stderr": "", "streamed": None, "gdir": gdir,
+                    "started": time.time(), "next": None}
+        if res.switched:
+            say(f"default login is now account {acct.slot} ({acct.label})")
+    check = agy.check_login(cmd0, gdir)
+    if not check.ok and check.kind in ("signin", "verify"):
+        reason = "login rejected" if check.kind == "signin" else "account needs verification"
+        _flag(acct.slot, quarantine=reason)
+        say(f"account {acct.slot} ({acct.label}): {reason}; quarantined")
+        nxt = _next(mgr, strategy, p["pool"], {acct.slot}, acct.slot)
+        return {"next": nxt, "conv_id": conv_id, "gdir": gdir}
+    capture(acct.slot, mgr.current_login() if not mgr.isolates else FileBackend(gdir).read())
+
+    run_args = args
+    if conv_id:
+        if prev_dir is not None:
+            mig = convstore.migrate_conversation(conv_id, prev_dir, gdir)
+            if not mig.ok:
+                say(f"conversation {conv_id} could not be carried over ({mig.error}); starting over")
+                conv_id = None
+            else:
+                detail = (f"{mig.steps_dst} step(s), integrity {mig.integrity}"
+                          if mig.steps_dst is not None else "byte copy (no SQLite tables)")
+                say(f"conversation {conv_id} carried over ({mig.method}, {detail})")
+                run_args = resume_args(args, conv_id, resume_prompt)
+    say(f"running on account {acct.slot} ({acct.label})" + (f", continuing {conv_id}" if conv_id else ""))
+    started = time.time()
+
+    def attempt_fn(_n: int):
+        return _run(cmd0 + agy.dir_args(gdir) + run_args, p["mode"], err, out)[:3]
+
+    def renew() -> bool:
+        again = agy.check_login(cmd0, gdir)
+        if again.ok:
+            _capture_dir(mgr, acct.slot, gdir)
+            say(f"account {acct.slot} ({acct.label}): access token renewed")
+            return True
+        say(f"account {acct.slot} ({acct.label}): token renewal failed ({again.message or again.kind})")
+        return False
+
+    try:
+        rc, stdout, stderr, attempts, _recovery = errors.run_with_recovery(
+            attempt_fn, renew_fn=renew, log=lambda m: say(f"account {acct.slot}: {m}"))
+        if attempts > 1:
+            say(f"account {acct.slot} ({acct.label}): {attempts} attempt(s) were needed")
+        streamed = agy.newest_conversation(gdir, started) if p["mode"] == "stream-json" else None
+    except KeyboardInterrupt:
+        _capture_dir(mgr, acct.slot, gdir)
+        raise
+    _capture_dir(mgr, acct.slot, gdir)
+    return {"rc": rc, "stdout": stdout, "stderr": stderr, "streamed": streamed,
+            "gdir": gdir, "started": started, "next": None}
 
 
 def _capture_dir(mgr: Manager, slot: int, gdir: Path) -> None:

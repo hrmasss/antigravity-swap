@@ -188,22 +188,15 @@ def _unshare(dst: Path) -> None:
 
 
 def copy_conversation(conv_id: str, src_gdir: Path, dst_gdir: Path) -> bool:
-    """Carry one conversation to another agy directory so ``--conversation`` can resume it."""
-    scli, dcli = paths.cli_dir(src_gdir), paths.cli_dir(dst_gdir)
-    db = scli / "conversations" / f"{conv_id}.db"
-    if not db.is_file():
-        return False
-    if scli.resolve() == dcli.resolve() or (dcli / "conversations").resolve() == (scli / "conversations").resolve():
-        return True
-    (dcli / "conversations").mkdir(parents=True, exist_ok=True)
-    shutil.copy2(db, dcli / "conversations" / db.name)
-    if (scli / "brain" / conv_id).is_dir():
-        shutil.copytree(scli / "brain" / conv_id, dcli / "brain" / conv_id, dirs_exist_ok=True)
-    ann = scli / "annotations" / f"{conv_id}.pbtxt"
-    if ann.is_file():
-        (dcli / "annotations").mkdir(parents=True, exist_ok=True)
-        shutil.copy2(ann, dcli / "annotations" / ann.name)
-    return True
+    """Carry one conversation to another agy directory so ``--conversation`` can resume it.
+
+    Delegates to :mod:`antigravity_swap.convstore`, which uses the SQLite backup API so that
+    turns committed but not yet checkpointed (still in the ``-wal``) are not lost. The old
+    implementation copied ``<id>.db`` with ``shutil`` and dropped those turns silently.
+    """
+    from antigravity_swap.convstore import migrate_conversation
+
+    return migrate_conversation(conv_id, src_gdir, dst_gdir).ok
 
 
 def newest_conversation(gdir: Path, since: float) -> str | None:

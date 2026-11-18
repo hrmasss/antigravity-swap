@@ -19,7 +19,7 @@ import time
 from pathlib import Path
 from typing import TextIO
 
-from antigravity_swap import agy, paths
+from antigravity_swap import agy, convstore, paths, slotlock
 from antigravity_swap.failover import (PROMPT_FLAGS, ExecError, _capture_dir, _drop, _exhausted, _flag,
                                        _flag_value, _next, pool_for, run_exec)
 from antigravity_swap.manager import Manager, with_registry
@@ -172,6 +172,16 @@ def run_interactive(mgr: Manager, agy_args: list[str], target: str | None = None
 
     while True:
         tried.add(acct.slot)
+        # One writer per slot: an interactive session holds this slot for its whole life.
+        try:
+            _slot_lock = slotlock.acquire(acct.slot, wait=False, reason="run")
+        except slotlock.SlotBusy as exc:
+            say(str(exc))
+            nxt = _next(mgr, strategy, pool, tried, acct.slot)
+            if nxt is None:
+                return _exhausted(say)
+            acct = nxt
+            continue
         if mgr.isolates:
             on_default = default_acct is not None and acct.slot == default_acct.slot and not share_history
             gdir = mgr.gdir if on_default else agy.prepare_session(
@@ -183,10 +193,14 @@ def run_interactive(mgr: Manager, agy_args: list[str], target: str | None = None
                 say(f"default login is now account {acct.slot} ({acct.label})")
             gdir = mgr.gdir
         if conv and prev_dir is not None:
-            if agy.copy_conversation(conv, prev_dir, gdir):
+            mig = convstore.migrate_conversation(conv, prev_dir, gdir)
+            if mig.ok:
+                say(f"conversation {conv} carried over ({mig.method}, {mig.steps_dst} step(s), "
+                    f"integrity {mig.integrity})")
                 run_args = resume_args(agy_args, conv, resume_prompt)
             else:
-                say(f"conversation {conv} was not found on disk; starting a fresh session")
+                say(f"conversation {conv} could not be carried over ({mig.error}); "
+                    f"starting a fresh session")
                 run_args = list(agy_args)
         logpath = Path(user_log) if user_log else logdir / f"{os.getpid()}-{hops}.log"
         launch = run_args if user_log else run_args + [f"--log-file={logpath}"]
@@ -221,6 +235,7 @@ def run_interactive(mgr: Manager, agy_args: list[str], target: str | None = None
         finally:
             signal.signal(signal.SIGINT, prev_int)
             watch.done.set()
+            _slot_lock.release()
         _capture_dir(mgr, acct.slot, gdir)
         conv = watch.conv or agy.newest_conversation(gdir, started) or conv
         if not user_log:
