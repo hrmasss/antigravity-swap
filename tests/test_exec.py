@@ -91,3 +91,12 @@ def test_rotate_continues_after_the_failed_account(env):
     rc, out, err = run(env, ["-p", "x"], target="2", strategy="rotate")
     assert rc == 0
     assert "done by c@x.io" in out
+
+
+def test_rotate_wraparound_ordered_slot_locking(env):
+    """Test failover when prev_slot > acct.slot (slot 3 -> slot 1) with ordered lock."""
+    env.plan({"a@x.io": "ok", "b@x.io": "ok", "c@x.io": "quota"})
+    add_accounts(env, "a@x.io", "b@x.io", "c@x.io")
+    rc, out, err = run(env, ["-p", "x"], target="3", strategy="rotate")
+    assert rc == 0
+    assert "done by a@x.io" in out

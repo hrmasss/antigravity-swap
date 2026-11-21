@@ -280,23 +280,25 @@ def copy_sidecars(conv_id: str, src_gdir: Path, dst_gdir: Path) -> tuple[bool, b
 
 
 def _sweep_stale_temps(directory: Path, name: str, max_age_s: float = 300.0) -> int:
-    """Delete ``.<name>.migrating-*`` files left by a process that died mid-copy.
+    """Delete ``.<name>.migrating-*`` and ``.<name>.stale*`` files left by a process that died mid-copy.
 
-    Each file is a complete-in-progress snapshot; a stranded one is wasted disk and, worse,
-    makes "what is on disk" ambiguous. Only files older than ``max_age_s`` are removed so a
-    concurrent migration in another process is never disturbed.
+    Each migrating file is a complete-in-progress snapshot; stale files are retired sidecar
+    files from previous migrations. Stranded files waste disk and make on-disk state ambiguous.
+    Only files older than ``max_age_s`` are removed so a concurrent migration in another
+    process is never disturbed.
     """
     removed = 0
     if not directory.is_dir():
         return 0
     cutoff = time.time() - max_age_s
-    for stale in directory.glob(f".{name}.migrating-*"):
-        try:
-            if stale.stat().st_mtime < cutoff:
-                _remove_family(stale)
-                removed += 1
-        except OSError:
-            continue
+    for pattern in (f".{name}.migrating-*", f".{name}.stale*"):
+        for stale in directory.glob(pattern):
+            try:
+                if stale.stat().st_mtime < cutoff:
+                    _remove_family(stale)
+                    removed += 1
+            except OSError:
+                continue
     return removed
 
 

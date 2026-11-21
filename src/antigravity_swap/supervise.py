@@ -195,11 +195,17 @@ def run_interactive(mgr: Manager, agy_args: list[str], target: str | None = None
             gdir = mgr.gdir
         if conv and prev_dir is not None:
             if prev_slot is not None and prev_slot != acct.slot:
-                try:
-                    with slotlock.held(prev_slot, wait=True, wait_s=5.0, reason="migrate_src"):
-                        mig = convstore.migrate_conversation(conv, prev_dir, gdir)
-                except slotlock.SlotBusy:
+                # Use ordered acquisition to avoid lock-ordering inversion
+                if prev_slot < acct.slot:
+                    # Would grab low while holding high — skip lock (inversion risk), migrate directly
                     mig = convstore.migrate_conversation(conv, prev_dir, gdir)
+                else:
+                    # prev_slot > acct.slot — grabbing high while holding low, safe
+                    try:
+                        with slotlock.held(prev_slot, wait=True, wait_s=1.0, reason="migrate_src"):
+                            mig = convstore.migrate_conversation(conv, prev_dir, gdir)
+                    except slotlock.SlotBusy:
+                        mig = convstore.migrate_conversation(conv, prev_dir, gdir)
             else:
                 mig = convstore.migrate_conversation(conv, prev_dir, gdir)
             if mig.ok:
