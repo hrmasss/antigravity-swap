@@ -61,37 +61,33 @@ def _drop(args: list[str], names: tuple[str, ...], takes_value: bool = True) -> 
     return out
 
 
-def default_model(mgr: Manager, probe: bool = True) -> str | None:
-    """The model plain ``agy`` would use: its own ``settings.json``, else the first from ``agy models``."""
+def default_model(mgr: Manager) -> str | None:
+    """The model plain ``agy`` is configured with, from its own ``settings.json``.
+
+    Deliberately does *not* run ``agy models`` to discover it: that probe would have to use
+    either the live login's directory (touching an account this run may not use) or an
+    account's session directory (which has not been prepared yet). No model here means an
+    unknown pool, and an unknown pool is held account-wide rather than guessed.
+    """
     try:
         cfg = json.loads((mgr.gdir / "antigravity-cli" / "settings.json").read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        cfg = {}
+        return None
     for key in ("model", "defaultModel", "selectedModel"):
         if cfg.get(key):
             return str(cfg[key])
-    if not probe:
-        return None
-    try:
-        out = agy.list_models(mgr.agy_cmd(), mgr.gdir)
-    except Exception:
-        return None
-    for line in (out or "").splitlines():
-        cols = line.split("\t")
-        if cols and cols[0].strip() and not cols[0].lower().startswith("fetching"):
-            return cols[0].strip()
     return None
 
 
-def resolved_model(args: list[str], mgr: Manager | None, probe: bool = True) -> str | None:
-    """``--model`` when given, else the model agy itself would run."""
+def resolved_model(args: list[str], mgr: Manager | None) -> str | None:
+    """``--model`` when given, else the model agy itself is configured with."""
     _, model, _ = _flag_value(args, ("--model",))
     if model:
         return model
-    return default_model(mgr, probe=probe) if mgr is not None else None
+    return default_model(mgr) if mgr is not None else None
 
 
-def plan(args: list[str], mgr: Manager | None = None, probe: bool = True) -> dict:
+def plan(args: list[str], mgr: Manager | None = None) -> dict:
     """Validate the agy arguments ``exec`` was given and work out how to drive them.
 
     ``pool`` is the quota pool this run draws from; ``pool_known`` says whether that could be
@@ -108,7 +104,7 @@ def plan(args: list[str], mgr: Manager | None = None, probe: bool = True) -> dic
     _, fmt, _ = _flag_value(args, ("--output-format",))
     mode = fmt or "text"
     run_args = list(args) if fmt else list(args) + ["--output-format", "json"]
-    model = resolved_model(args, mgr, probe=probe)
+    model = resolved_model(args, mgr)
     pool = pool_of_model(model)
     return {"args": run_args, "mode": mode, "pool": pool or "all", "model": model,
             "pool_known": pool is not None}

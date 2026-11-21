@@ -138,7 +138,7 @@ def _session_plan(mgr: Manager, agy_args: list[str] | None = None) -> dict:
     from antigravity_swap.failover import resolved_model
     from antigravity_swap.usage import pool_of_model
 
-    model = resolved_model(agy_args or [], mgr, probe=False)
+    model = resolved_model(agy_args or [], mgr)
     pool = pool_of_model(model)
     return {"pool": pool or "all", "model": model,
             "pool_known": pool is not None}
