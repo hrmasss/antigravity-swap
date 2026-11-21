@@ -168,6 +168,7 @@ def run_interactive(mgr: Manager, agy_args: list[str], target: str | None = None
     hops = 0
     conv: str | None = None
     prev_dir: Path | None = None
+    prev_slot: int | None = None
     run_args = list(agy_args)
 
     while True:
@@ -193,7 +194,14 @@ def run_interactive(mgr: Manager, agy_args: list[str], target: str | None = None
                 say(f"default login is now account {acct.slot} ({acct.label})")
             gdir = mgr.gdir
         if conv and prev_dir is not None:
-            mig = convstore.migrate_conversation(conv, prev_dir, gdir)
+            if prev_slot is not None and prev_slot != acct.slot:
+                try:
+                    with slotlock.held(prev_slot, wait=True, wait_s=5.0, reason="migrate_src"):
+                        mig = convstore.migrate_conversation(conv, prev_dir, gdir)
+                except slotlock.SlotBusy:
+                    mig = convstore.migrate_conversation(conv, prev_dir, gdir)
+            else:
+                mig = convstore.migrate_conversation(conv, prev_dir, gdir)
             if mig.ok:
                 say(f"conversation {conv} carried over ({mig.method}, {mig.steps_dst} step(s), "
                     f"integrity {mig.integrity})")
@@ -253,4 +261,5 @@ def run_interactive(mgr: Manager, agy_args: list[str], target: str | None = None
             f"{nxt.slot} ({nxt.label})")
         hops += 1
         prev_dir = gdir
+        prev_slot = acct.slot
         acct = nxt

@@ -170,6 +170,7 @@ def run_exec(mgr: Manager, agy_args: list[str], target: str | None = None, strat
     hops = 0
     conv_id: str | None = None
     prev_dir: Path | None = None
+    prev_slot: int | None = None
     args = p["args"]
 
     while True:
@@ -179,7 +180,7 @@ def run_exec(mgr: Manager, agy_args: list[str], target: str | None = None, strat
             # symlink/token placement, the `agy models` probe and the turn itself.
             with slotlock.held(acct.slot, wait=False, reason="exec"):
                 outcome = _exec_on_slot(mgr, acct, args, conv_id, prev_dir, p, cmd0, resume_prompt,
-                                        say, out, err, strategy)
+                                        say, out, err, strategy, prev_slot=prev_slot)
         except slotlock.SlotBusy as exc:
             say(str(exc))
             nxt = _next(mgr, strategy, p["pool"], tried, acct.slot)
@@ -190,6 +191,7 @@ def run_exec(mgr: Manager, agy_args: list[str], target: str | None = None, strat
                 return EXHAUSTED_EXIT
             hops += 1
             prev_dir = None
+            prev_slot = None
             acct = nxt
             continue
 
@@ -202,6 +204,7 @@ def run_exec(mgr: Manager, agy_args: list[str], target: str | None = None, strat
                 return EXHAUSTED_EXIT
             hops += 1
             conv_id, prev_dir = outcome.get("conv_id"), outcome.get("gdir")
+            prev_slot = acct.slot
             acct = nxt
             continue
 
@@ -239,11 +242,12 @@ def run_exec(mgr: Manager, agy_args: list[str], target: str | None = None, strat
             _emit(p["mode"], result, stdout, out)
             return EXHAUSTED_EXIT
         prev_dir = gdir
+        prev_slot = acct.slot
         acct = nxt
 
 
 def _exec_on_slot(mgr: Manager, acct, args, conv_id, prev_dir, p, cmd0, resume_prompt,
-                  say, out, err, strategy: str) -> dict:
+                  say, out, err, strategy: str, prev_slot: int | None = None) -> dict:
     """Prepare, probe and run one account. Caller holds that slot's lock."""
     gdir = agy.prepare_session(acct.slot, default_gdir=mgr.gdir) if mgr.isolates else mgr.gdir
     if not mgr.isolates:
@@ -267,7 +271,14 @@ def _exec_on_slot(mgr: Manager, acct, args, conv_id, prev_dir, p, cmd0, resume_p
     run_args = args
     if conv_id:
         if prev_dir is not None:
-            mig = convstore.migrate_conversation(conv_id, prev_dir, gdir)
+            if prev_slot is not None and prev_slot != acct.slot:
+                try:
+                    with slotlock.held(prev_slot, wait=True, wait_s=5.0, reason="migrate_src"):
+                        mig = convstore.migrate_conversation(conv_id, prev_dir, gdir)
+                except slotlock.SlotBusy:
+                    mig = convstore.migrate_conversation(conv_id, prev_dir, gdir)
+            else:
+                mig = convstore.migrate_conversation(conv_id, prev_dir, gdir)
             if not mig.ok:
                 say(f"conversation {conv_id} could not be carried over ({mig.error}); starting over")
                 conv_id = None

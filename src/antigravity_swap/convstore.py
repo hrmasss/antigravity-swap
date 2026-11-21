@@ -23,6 +23,7 @@ Post-conditions checked before the destination file is swapped in:
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import os
 import sqlite3
@@ -97,16 +98,17 @@ def _conv_present(conn: sqlite3.Connection, conv_id: str) -> bool:
     return False
 
 
-def _unlink_quiet(p: Path) -> None:
+def _unlink_quiet(p: Path, notes: list[str] | None = None) -> None:
     try:
         p.unlink()
-    except OSError:
-        pass
+    except OSError as exc:
+        if notes is not None:
+            notes.append(f"warning: failed to unlink {p.name}: {exc}")
 
 
-def _remove_family(p: Path) -> None:
+def _remove_family(p: Path, notes: list[str] | None = None) -> None:
     for suffix in ("", "-wal", "-shm"):
-        _unlink_quiet(Path(str(p) + suffix))
+        _unlink_quiet(Path(str(p) + suffix), notes)
 
 
 def _is_sqlite(p: Path) -> bool:
@@ -137,37 +139,62 @@ def snapshot_database(src: Path, dst: Path) -> tuple[str, list[str]]:
         finally:
             _remove_family(tmp)
 
+    method = None
     try:
+        # Phase 1: Creation & Validation of Backup File in tmp
         try:
-            with sqlite3.connect(_conn_uri(src), uri=True, timeout=BUSY_TIMEOUT_MS / 1000) as s:
+            s = None
+            d = None
+            try:
+                s = sqlite3.connect(_conn_uri(src), uri=True, timeout=BUSY_TIMEOUT_MS / 1000)
                 s.execute(f"pragma busy_timeout={BUSY_TIMEOUT_MS}")
-                with sqlite3.connect(tmp) as d:
-                    d.execute(f"pragma busy_timeout={BUSY_TIMEOUT_MS}")
-                    s.backup(d)
-                    d.commit()
-            return _publish(tmp, dst, "backup", notes)
+                d = sqlite3.connect(tmp, timeout=BUSY_TIMEOUT_MS / 1000)
+                d.execute(f"pragma busy_timeout={BUSY_TIMEOUT_MS}")
+                s.backup(d)
+                d.commit()
+            finally:
+                if d is not None:
+                    d.close()
+                if s is not None:
+                    try:
+                        s.close()
+                    except sqlite3.Error as exc:
+                        notes.append(f"warning: source close failed: {exc}")
+            method = "backup"
         except (sqlite3.Error, OSError) as exc:
             notes.append(f"backup API unavailable: {exc.__class__.__name__}: {exc}")
             _remove_family(tmp)
 
-        # Fallback: checkpoint the source, then copy coherently.
-        try:
-            with sqlite3.connect(src, timeout=BUSY_TIMEOUT_MS / 1000) as s:
-                s.execute(f"pragma busy_timeout={BUSY_TIMEOUT_MS}")
-                busy, log_frames, checkpointed = s.execute("pragma wal_checkpoint(FULL)").fetchone()
+            # Fallback: checkpoint the source, then copy coherently.
+            s_fb = None
+            try:
+                s_fb = sqlite3.connect(src, timeout=BUSY_TIMEOUT_MS / 1000)
+                s_fb.execute(f"pragma busy_timeout={BUSY_TIMEOUT_MS}")
+                busy, log_frames, checkpointed = s_fb.execute("pragma wal_checkpoint(FULL)").fetchone()
+            finally:
+                if s_fb is not None:
+                    s_fb.close()
+
             if busy:
                 raise MigrationError(
                     f"source is locked by a live writer (wal_checkpoint busy={busy}); "
                     "refusing to copy a database that is being written")
             notes.append(f"checkpointed {checkpointed}/{log_frames} wal frames")
             shutil_copy_family(src, tmp)
-            return _publish(tmp, dst, "checkpoint+copy", notes)
-        except MigrationError:
-            _remove_family(tmp)
-            raise
-        except (sqlite3.Error, OSError) as exc:
-            _remove_family(tmp)
-            raise MigrationError(f"no safe copy possible: {exc.__class__.__name__}: {exc}") from None
+            method = "checkpoint+copy"
+    except MigrationError:
+        _remove_family(tmp)
+        raise
+    except (sqlite3.Error, OSError) as exc:
+        _remove_family(tmp)
+        raise MigrationError(f"no safe copy possible: {exc.__class__.__name__}: {exc}") from exc
+
+    # Phase 2: Atomic Publication (completely decoupled from backup path)
+    try:
+        return _publish(tmp, dst, method, notes)
+    except OSError as exc:
+        _remove_family(tmp)
+        raise MigrationError(f"publication failed: {exc.__class__.__name__}: {exc}") from exc
     finally:
         _remove_family(tmp)
 
@@ -184,12 +211,53 @@ def shutil_copy_family(src: Path, tmp: Path) -> None:
 
 
 def _publish(tmp: Path, dst: Path, method: str, notes: list[str]) -> tuple[str, list[str]]:
-    # A pre-existing destination family would otherwise be mixed with the new pages.
-    _remove_family(dst)
-    for suffix in ("", "-wal", "-shm"):
-        side = Path(str(tmp) + suffix)
-        if side.exists():
-            os.replace(side, Path(str(dst) + suffix))
+    """Atomically publish ``tmp`` to ``dst`` without prematurely deleting ``dst``."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    retired: list[tuple[Path, Path]] = []
+    pid_time = f"{os.getpid()}-{int(time.time() * 1000)}"
+
+    # 1. Staging / Retirement: If destination already has sidecars but tmp does not have
+    # new ones (e.g. method == "backup"), move old sidecars to unique retired filenames
+    # before replacing dst. This prevents a race condition where a concurrent connection
+    # opening dst after os.replace(tmp, dst) has its active WAL/SHM unlinked.
+    for suffix in ("-wal", "-shm"):
+        side_tmp = Path(str(tmp) + suffix)
+        side_dst = Path(str(dst) + suffix)
+        if not side_tmp.exists() and side_dst.exists():
+            stale_retired = dst.with_name(f".{dst.name}.stale{suffix}-{pid_time}")
+            try:
+                os.replace(side_dst, stale_retired)
+                retired.append((stale_retired, side_dst))
+            except OSError as exc:
+                notes.append(f"warning: failed to retire stale sidecar {side_dst.name}: {exc}")
+
+    try:
+        # 2. Atomically replace the main database file
+        os.replace(tmp, dst)
+    except BaseException:
+        # If replacing the main database fails, restore any retired sidecars to preserve dst
+        for stale_retired, side_dst in retired:
+            if stale_retired.exists():
+                try:
+                    os.replace(stale_retired, side_dst)
+                except OSError:
+                    pass
+        raise
+
+    # 3. Publish new sidecars if they exist (e.g. checkpoint+copy fallback)
+    for suffix in ("-wal", "-shm"):
+        side_tmp = Path(str(tmp) + suffix)
+        side_dst = Path(str(dst) + suffix)
+        if side_tmp.exists():
+            try:
+                os.replace(side_tmp, side_dst)
+            except OSError as exc:
+                notes.append(f"warning: failed to replace sidecar {side_dst.name}: {exc}")
+
+    # 4. Safely unlink retired stale sidecars (now completely decoupled from active dst sidecars)
+    for stale_retired, _ in retired:
+        _unlink_quiet(stale_retired, notes)
+
     return method, notes
 
 
@@ -257,7 +325,7 @@ def migrate_conversation(conv_id: str, src_gdir: Path, dst_gdir: Path) -> Migrat
         res.error = str(exc)
         return res
 
-    with sqlite3.connect(_conn_uri(src_db), uri=True) as s:
+    with contextlib.closing(sqlite3.connect(_conn_uri(src_db), uri=True)) as s:
         res.steps_src = _step_count(s)
     if res.method == "copy-non-sqlite":
         # Verification is not applicable: the file cannot be opened as SQLite at all.
@@ -265,7 +333,7 @@ def migrate_conversation(conv_id: str, src_gdir: Path, dst_gdir: Path) -> Migrat
         res.ok = dst_db.is_file()
         res.notes.append("verified by byte copy only (no SQLite tables to check)")
         return res
-    with sqlite3.connect(_conn_uri(dst_db), uri=True) as d:
+    with contextlib.closing(sqlite3.connect(_conn_uri(dst_db), uri=True)) as d:
         res.integrity = d.execute("pragma integrity_check").fetchone()[0]
         res.steps_dst = _step_count(d)
         res.conv_verified = _conv_present(d, conv_id)
