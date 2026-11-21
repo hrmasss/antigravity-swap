@@ -15,6 +15,8 @@ from antigravity_swap.credentials import FileBackend
 from antigravity_swap.store import load_cred
 
 QUOTA_RE = re.compile(r"RESOURCE_EXHAUSTED|Individual quota reached|\bcode 429\b", re.I)
+# The CLI's own wording when a *model group* runs out: "Baseline model quota reached."
+QUOTA_BASELINE_RE = re.compile(r"Baseline model quota reached|baseline model quota", re.I)
 RESET_RE = re.compile(r"Resets in\s+((?:\d+h)?\s*(?:\d+m)?\s*(?:\d+(?:\.\d+)?s)?)", re.I)
 SIGNIN_RE = re.compile(r"Authentication required|Please visit the URL to log in|Please sign in", re.I)
 VERIFY_RE = re.compile(r"Verify your account|not eligible for Antigravity", re.I)
@@ -85,6 +87,21 @@ def check_login(agy: list[str], gdir: Path | None, timeout: float = 60) -> Check
     kind = classify_failure(out)
     msg = next((ln.strip() for ln in out.splitlines() if ln.strip() and "Fetching" not in ln), "")
     return Check(False, kind if kind != "quota" else "error", msg[:300])
+
+
+def list_models(agy: list[str], gdir: Path | None, timeout: float = 60) -> str:
+    """stdout of ``agy models`` (``<id>\\t<display name>`` per line); "" when it fails.
+
+    Same call as :func:`check_login` — it renews the token and spends no quota — kept
+    separate because callers here want the *text*, not a pass/fail.
+    """
+    try:
+        r = subprocess.run(agy + dir_args(gdir) + ["models"], stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+    return r.stdout or ""
 
 
 def parse_reset(text: str) -> float | None:

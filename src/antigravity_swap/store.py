@@ -31,17 +31,44 @@ class Account:
     limited_reason: str | None = None
     quarantined: bool = False
     quarantine_reason: str | None = None
+    # Per-pool holds: {"3p": epoch, "gemini": epoch}. An account whose Claude/GPT quota is gone
+    # still has Gemini quota, so a quota error must never hold the whole account out.
+    pool_limits: dict[str, float] = field(default_factory=dict)
+    pool_reasons: dict[str, str] = field(default_factory=dict)
 
     @property
     def label(self) -> str:
         return self.email or f"account-{self.slot}"
 
     def is_limited(self, now: float | None = None) -> bool:
-        return self.limited_until > (now or time.time())
+        """Held out for every pool (set by hand, or a quota error whose model was unknown)."""
+        now = now or time.time()
+        return self.limited_until > now or any(ts > now for ts in self.pool_limits.values())
 
-    def rotatable(self, now: float | None = None) -> bool:
-        """Eligible for anything aswap picks on its own."""
-        return not self.disabled and not self.quarantined and not self.is_limited(now)
+    def pool_hold(self, pool: str, now: float | None = None) -> float:
+        return float(self.pool_limits.get(pool) or 0.0)
+
+    def pool_limited(self, pool: str, now: float | None = None) -> bool:
+        """Held out for ``pool`` only (and not for the other pool)."""
+        now = now or time.time()
+        return self.pool_hold(pool, now) > now
+
+    def rotatable(self, now: float | None = None, pool: str | None = None) -> bool:
+        """Eligible for anything aswap picks on its own.
+
+        ``pool`` narrows it to *that* quota pool: an account held for Claude/GPT is still
+        rotatable for Gemini work, and the other way round.
+        """
+        now = now or time.time()
+        if self.disabled or self.quarantined:
+            return False
+        if pool and pool != "all":
+            if self.pool_limited(pool, now):
+                return False
+            if self.limited_until > now and not self.pool_limits:
+                return False
+            return True
+        return not self.is_limited(now)
 
     def identity(self) -> Identity:
         return Identity(self.email, self.sub)

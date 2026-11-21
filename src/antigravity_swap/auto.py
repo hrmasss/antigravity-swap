@@ -75,16 +75,16 @@ def _ev(kind: str, **kw) -> dict:
 
 def decide(mgr: Manager, reg: Registry, active, policy: Policy, last_switch: float, now: float):
     """Pure decision step: returns (target or None, reason, outcome_if_no_switch)."""
-    if active.is_limited(now):
+    if active.is_limited(now) or active.pool_limited(policy.pool, now):
         used = 100.0
     else:
         used = binding_used(mgr.cached(active).get("reading"), policy.pool)
     if used is None:
         return None, "active account usage unknown; holding", Outcome.NOTHING, used
-    exhausted = used >= EXHAUSTED or active.is_limited(now)
+    exhausted = used >= EXHAUSTED or active.is_limited(now) or active.pool_limited(policy.pool, now)
     candidates = []
     for a in reg.ordered():
-        if a.slot == active.slot or not a.rotatable(now):
+        if a.slot == active.slot or not a.rotatable(now, policy.pool):
             continue
         u = binding_used(mgr.cached(a).get("reading"), policy.pool)
         if u is None or u >= policy.threshold:

@@ -27,6 +27,7 @@ import contextlib
 import hashlib
 import os
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -127,7 +128,7 @@ def snapshot_database(src: Path, dst: Path) -> tuple[str, list[str]]:
     """
     notes: list[str] = []
     dst.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dst.with_name(f".{dst.name}.migrating-{os.getpid()}-{int(time.time() * 1000)}")
+    tmp = dst.with_name(f".{dst.name}.migrating-{os.getpid()}-{threading.get_ident()}-{time.time_ns()}")
     _remove_family(tmp)
 
     if not _is_sqlite(src):
@@ -214,7 +215,7 @@ def _publish(tmp: Path, dst: Path, method: str, notes: list[str]) -> tuple[str, 
     """Atomically publish ``tmp`` to ``dst`` without prematurely deleting ``dst``."""
     dst.parent.mkdir(parents=True, exist_ok=True)
     retired: list[tuple[Path, Path]] = []
-    pid_time = f"{os.getpid()}-{int(time.time() * 1000)}"
+    pid_time = f"{os.getpid()}-{threading.get_ident()}-{time.time_ns()}"
 
     # 1. Staging / Retirement: If destination already has sidecars but tmp does not have
     # new ones (e.g. method == "backup"), move old sidecars to unique retired filenames

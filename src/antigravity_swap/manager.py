@@ -11,7 +11,8 @@ from antigravity_swap.credentials import Backend, Credential, CredentialError, F
 from antigravity_swap.fsutil import locked, read_json, write_json
 from antigravity_swap.settings import Settings
 from antigravity_swap.store import Account, Registry, StoreError, capture, load_cred, save_cred, usage_path
-from antigravity_swap.usage import UsageError, binding_used, fetch, weekly_reset
+from antigravity_swap.usage import (UsageError, binding_used, fetch, pool_label, pool_of_model,
+                                    weekly_reset)
 
 EXHAUSTED = 99.5
 
@@ -305,21 +306,38 @@ class Manager:
     def used(self, acct: Account, pool: str) -> float | None:
         return binding_used(self.cached(acct).get("reading"), pool)
 
+    def ineligible(self, acct: Account, pool: str, now: float | None = None) -> str | None:
+        """Why this account cannot serve a request in ``pool`` right now, or None if it can."""
+        now = now or time.time()
+        if acct.disabled:
+            return "disabled"
+        if acct.quarantined:
+            return f"quarantined: {acct.quarantine_reason}"
+        if acct.limited_until > now and (pool == "all" or not acct.pool_limits):
+            return (f"held out until {_clock(acct.limited_until)}"
+                    + (f" ({acct.limited_reason})" if acct.limited_reason else ""))
+        if pool != "all" and acct.pool_limited(pool, now):
+            return (f"{pool_label(pool)} quota exhausted until {_clock(acct.pool_hold(pool, now))}"
+                    + (f" ({acct.pool_reasons.get(pool)})" if acct.pool_reasons.get(pool) else ""))
+        used = self.used(acct, pool)
+        if used is not None and used >= EXHAUSTED:
+            return f"{pool_label(pool)} at {used:.0f}% used"
+        return None
+
     def pick(self, reg: Registry, strategy: str, pool: str, current: Account | None = None,
              exclude: set[int] | None = None, threshold: float = 90.0) -> Account | None:
         exclude = set(exclude or ())
         now = time.time()
         order = reg.ordered()
-        pool_ = [a for a in order if a.rotatable(now) and a.slot not in exclude]
+        pool_ = [a for a in order if a.rotatable(now, pool) and a.slot not in exclude]
+        # A reading that already says "used up" disqualifies the account for that pool in every
+        # strategy, including round-robin: starting on it would only spend a turn to find out.
+        pool_ = [a for a in pool_ if self.ineligible(a, pool, now) is None]
         if current is not None:
             pool_ = [a for a in pool_ if a.slot != current.slot]
         if not pool_:
             return None
         if strategy in ("rotate", "next-available"):
-            if strategy == "next-available":
-                pool_ = [a for a in pool_ if (self.used(a, pool) or 0) < EXHAUSTED]
-                if not pool_:
-                    return None
             start = current.slot if current else 0
             after = [a for a in pool_ if a.slot > start]
             return (after or pool_)[0]
@@ -331,12 +349,33 @@ class Manager:
             room = [(a, u) for a, u in scored if u is None or u < threshold]
             if not room:
                 room = scored
+
             def key(item):
                 a, u = item
                 wr = weekly_reset(self.cached(a).get("reading"), pool)
                 return (u is None, wr if wr is not None else float("inf"), u or 0, a.slot)
+
             return min(room, key=key)[0]
         return min(scored, key=lambda item: (item[1] is None, item[1] or 0, item[0].slot))[0]
+
+    def no_available_message(self, reg: Registry, pool: str, tried: set[int] | None = None) -> str:
+        """A refusal that names the pool and every account's reason, so the caller can act."""
+        now = time.time()
+        tried = set(tried or ())
+        lines = []
+        for a in reg.ordered():
+            bits = [self.ineligible(a, pool, now) or "eligible"]
+            if a.slot in tried:
+                bits.append("already tried in this run")
+            lines.append(f"    {a.slot} {a.label}: " + "; ".join(bits))
+        head = (f"no account can serve a {pool_label(pool)} request right now"
+                if pool != "all" else "no account is available right now")
+        return head + ("\n" + "\n".join(lines) if lines else "")
+
+
+def _clock(ts: float | None) -> str:
+    return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts or 0))
+
 
 
 SWITCH_LOG_LEN = 200

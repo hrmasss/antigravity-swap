@@ -11,7 +11,7 @@ from antigravity_swap.credentials import CredentialError, FileBackend
 from antigravity_swap.manager import Manager, default_account_at
 from antigravity_swap.processes import Instance, list_instances
 from antigravity_swap.store import Account, Registry
-from antigravity_swap.usage import WINDOW_ORDER, windows
+from antigravity_swap.usage import WINDOW_ORDER, pool_label, windows
 
 LABELS = {
     "gemini-5h": "Gemini 5h",
@@ -68,8 +68,13 @@ def _header_bits(mgr: Manager, a: Account, is_active: bool, now: float) -> list[
         bits.append(style.dim("(disabled)"))
     if a.quarantined:
         bits.append(style.bad(f"(quarantined: {a.quarantine_reason})"))
-    if a.is_limited(now):
-        bits.append(style.warn(f"(limited until {fmt_reset(a.limited_until, now)}, in {fmt_in(a.limited_until - now)})"))
+    if a.limited_until > now:
+        bits.append(style.warn(f"(held until {fmt_reset(a.limited_until, now)}, "
+                               f"in {fmt_in(a.limited_until - now)})"))
+    for pool, until in (a.pool_limits or {}).items():
+        if until > now:
+            bits.append(style.warn(f"({pool_label(pool)} out until {fmt_reset(until, now)}, "
+                                   f"in {fmt_in(until - now)})"))
     rec = mgr.cached(a)
     status = rec.get("status")
     age = mgr.usage_age(a)

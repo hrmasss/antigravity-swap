@@ -1,9 +1,14 @@
 """``aswap exec``: run an agy print-mode task and carry it across accounts when one runs out.
 
-When a run stops on a quota error, the account is held out until the reset the error
-names, the conversation is copied to the next account's directory, and agy resumes it
-there with ``--conversation <id>``. A conversation is a local SQLite file, so it moves
-between Google accounts intact.
+When a run stops on a quota error, the account is held out **for the quota pool the model
+draws from** until the reset the error names, the conversation is copied to the next
+account's directory, and agy resumes it there with ``--conversation <id>``. A conversation
+is a local SQLite file, so it moves between Google accounts intact.
+
+Pools matter more than accounts. Antigravity's quota comes in two independent groups — Gemini,
+and Claude/GPT (``3p``) — so an account that is out of Claude/GPT quota for four days still
+serves Gemini perfectly. Holding the whole account out on any quota error is the bug this
+module exists to prevent: it burns a healthy pool and makes failover look broken.
 """
 
 from __future__ import annotations
@@ -20,6 +25,7 @@ from antigravity_swap import agy, convstore, errors, slotlock
 from antigravity_swap.credentials import FileBackend
 from antigravity_swap.manager import Manager, SwitchError, with_registry
 from antigravity_swap.store import Registry, capture
+from antigravity_swap.usage import pool_label, pool_of_model, weekly_reset
 
 PROMPT_FLAGS = ("-p", "--print", "--prompt")
 EXHAUSTED_EXIT = 3
@@ -55,14 +61,43 @@ def _drop(args: list[str], names: tuple[str, ...], takes_value: bool = True) -> 
     return out
 
 
-def pool_for(args: list[str]) -> str:
+def default_model(mgr: Manager, probe: bool = True) -> str | None:
+    """The model plain ``agy`` would use: its own ``settings.json``, else the first from ``agy models``."""
+    try:
+        cfg = json.loads((mgr.gdir / "antigravity-cli" / "settings.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        cfg = {}
+    for key in ("model", "defaultModel", "selectedModel"):
+        if cfg.get(key):
+            return str(cfg[key])
+    if not probe:
+        return None
+    try:
+        out = agy.list_models(mgr.agy_cmd(), mgr.gdir)
+    except Exception:
+        return None
+    for line in (out or "").splitlines():
+        cols = line.split("\t")
+        if cols and cols[0].strip() and not cols[0].lower().startswith("fetching"):
+            return cols[0].strip()
+    return None
+
+
+def resolved_model(args: list[str], mgr: Manager | None, probe: bool = True) -> str | None:
+    """``--model`` when given, else the model agy itself would run."""
     _, model, _ = _flag_value(args, ("--model",))
-    m = (model or "").lower()
-    return "3p" if m.startswith(("claude", "gpt", "o1", "o3", "o4")) else "gemini"
+    if model:
+        return model
+    return default_model(mgr, probe=probe) if mgr is not None else None
 
 
-def plan(args: list[str]) -> dict:
-    """Validate the agy arguments ``exec`` was given and work out how to drive them."""
+def plan(args: list[str], mgr: Manager | None = None, probe: bool = True) -> dict:
+    """Validate the agy arguments ``exec`` was given and work out how to drive them.
+
+    ``pool`` is the quota pool this run draws from; ``pool_known`` says whether that could be
+    established at all. An unidentified model must not be guessed into a pool, so it holds
+    no pool.
+    """
     if _flag_value(args, ("--gemini_dir",))[0] >= 0:
         raise ExecError("do not pass --gemini_dir; aswap picks the directory for each account")
     if _flag_value(args, ("-i", "--prompt-interactive"))[0] >= 0:
@@ -73,7 +108,14 @@ def plan(args: list[str]) -> dict:
     _, fmt, _ = _flag_value(args, ("--output-format",))
     mode = fmt or "text"
     run_args = list(args) if fmt else list(args) + ["--output-format", "json"]
-    return {"args": run_args, "mode": mode, "pool": pool_for(args)}
+    model = resolved_model(args, mgr, probe=probe)
+    pool = pool_of_model(model)
+    return {"args": run_args, "mode": mode, "pool": pool or "all", "model": model,
+            "pool_known": pool is not None}
+
+
+def pool_for(args: list[str], mgr: Manager | None = None) -> str:
+    return plan(args, mgr)["pool"]
 
 
 def resume_args(args: list[str], conv_id: str, prompt: str) -> list[str]:
@@ -144,22 +186,40 @@ def _run(cmd: list[str], mode: str, err: TextIO, out: TextIO) -> tuple[int, str,
 
 def run_exec(mgr: Manager, agy_args: list[str], target: str | None = None, strategy: str | None = None,
              max_hops: int | None = None, out: TextIO = sys.stdout, err: TextIO = sys.stderr) -> int:
-    p = plan(agy_args)
-    strategy = strategy or mgr.settings.get("failover.strategy")
+    p = plan(agy_args, mgr)
+    strategy = str(strategy or mgr.settings.get("failover.strategy") or "best")
     resume_prompt = mgr.settings.get("failover.resume_prompt")
     fallback = float(mgr.settings.get("failover.limit_fallback_hours")) * 3600
+    pool = p["pool"]
     cmd0 = mgr.agy_cmd()
 
     def say(msg: str) -> None:
         err.write(f"aswap: {msg}\n")
         err.flush()
 
-    def first(reg: Registry):
-        if target:
-            return reg.resolve(target)
-        return mgr.pick(reg, strategy, p["pool"])
+    def start(reg: Registry):
+        """The account to start on, plus a note when the requested one cannot serve ``pool``."""
+        if not target:
+            chosen = mgr.pick(reg, strategy, pool)
+            notes = [f"skipping account {a.slot} ({a.label}) for this {pool_label(pool)} run: {why}"
+                     for a in reg.ordered()
+                     for why in [mgr.ineligible(a, pool)]
+                     if why and (chosen is None or a.slot != chosen.slot)]
+            return chosen, "\n".join(notes) or None
+        want = reg.resolve(target)
+        why = mgr.ineligible(want, pool)
+        if why is None:
+            return want, None
+        alt = mgr.pick(reg, strategy, pool, current=want)
+        note = (f"account {want.slot} ({want.label}) cannot serve a {pool_label(pool)} request "
+                f"({why})")
+        if alt is None:
+            return want, note
+        return alt, note + f"; starting on account {alt.slot} ({alt.label}) instead"
 
-    acct = with_registry(first)
+    acct, note = with_registry(start)
+    if note:
+        say(note)
     if acct is None:
         say("no account is available (all disabled, quarantined or limited). See: aswap list")
         return EXHAUSTED_EXIT
@@ -172,6 +232,7 @@ def run_exec(mgr: Manager, agy_args: list[str], target: str | None = None, strat
     prev_dir: Path | None = None
     prev_slot: int | None = None
     args = p["args"]
+    pool_failed = False
 
     while True:
         tried.add(acct.slot)
@@ -183,9 +244,9 @@ def run_exec(mgr: Manager, agy_args: list[str], target: str | None = None, strat
                                         say, out, err, strategy, prev_slot=prev_slot)
         except slotlock.SlotBusy as exc:
             say(str(exc))
-            nxt = _next(mgr, strategy, p["pool"], tried, acct.slot)
+            nxt = _next(mgr, strategy, pool, tried, acct.slot)
             if nxt is None:
-                return _exhausted(say)
+                return _exhausted(say, mgr, pool, tried, failed_pool=pool if pool_failed else None)
             if hops >= max_hops:
                 say(f"stopped after {hops} account change(s) (failover.max_hops)")
                 return EXHAUSTED_EXIT
@@ -195,10 +256,8 @@ def run_exec(mgr: Manager, agy_args: list[str], target: str | None = None, strat
             acct = nxt
             continue
 
-        if outcome["next"] is not None:
+        if outcome.get("next") is not None:
             nxt = outcome["next"]
-            if nxt is None:
-                return _exhausted(say)
             if hops >= max_hops:
                 say(f"stopped after {hops} account change(s) (failover.max_hops)")
                 return EXHAUSTED_EXIT
@@ -220,30 +279,46 @@ def run_exec(mgr: Manager, agy_args: list[str], target: str | None = None, strat
             _emit(p["mode"], result, stdout, out)
             return 0
         if kind not in ("quota", "signin", "verify"):
+            # A generic 403 lands here: not an exhaustion signal, so no rotation and no
+            # quarantine — stop and leave the account exactly as it was.
+            for hint in errors.investigate_hints(blob, slot=acct.slot, label=acct.label):
+                say(hint)
             _emit(p["mode"], result, stdout, out)
             return rc or 1
         if kind == "quota":
             secs = agy.parse_reset(blob)
-            until = time.time() + (secs or fallback)
-            _flag(acct.slot, limited=(until, "quota: Individual quota reached" if secs else "quota error"))
-            say(f"account {acct.slot} ({acct.label}) hit its quota; held out until "
-                f"{time.strftime('%H:%M', time.localtime(until))}")
+            until = time.time() + (secs or _reading_reset(mgr, acct, pool) or fallback)
+            where = _hold(acct.slot, pool, until, blob, p["pool_known"])
+            say(f"account {acct.slot} ({acct.label}) hit its quota: {where} quota exhausted (Individual quota "
+                f"reached); held out until {time.strftime('%Y-%m-%d %H:%M', time.localtime(until))}")
+            if p["pool_known"] and pool != "all":
+                others = [b for b in ("gemini", "3p") if b != pool]
+                if others:
+                    say(f"account {acct.slot} ({acct.label}) still serves {pool_label(others[0])} work")
+            pool_failed = True
         else:
             reason = "login rejected" if kind == "signin" else "account needs verification"
             _flag(acct.slot, quarantine=reason)
             say(f"account {acct.slot} ({acct.label}): {reason}; quarantined")
         hops += 1
-        nxt = _next(mgr, strategy, p["pool"], tried, acct.slot)
+        nxt = _next(mgr, strategy, pool, tried, acct.slot)
         if nxt is None:
             _emit(p["mode"], result, stdout, out)
-            return _exhausted(say)
-        if hops >= max_hops:
-            say(f"stopped after {hops} account change(s) (failover.max_hops)")
+            return _exhausted(say, mgr, pool, tried, failed_pool=pool if kind == "quota" else None)
+        if hops > max_hops:
+            say(f"stopped after {max_hops} account change(s) (failover.max_hops)")
             _emit(p["mode"], result, stdout, out)
             return EXHAUSTED_EXIT
+        say(f"continuing on account {nxt.slot} ({nxt.label})")
         prev_dir = gdir
         prev_slot = acct.slot
         acct = nxt
+
+
+def _reading_reset(mgr: Manager, acct, pool: str) -> float | None:
+    """The pool's own reset time from the last quota reading, for errors that name none."""
+    reset = weekly_reset(mgr.cached(acct).get("reading"), pool)
+    return max(0.0, reset - time.time()) if reset else None
 
 
 def _exec_on_slot(mgr: Manager, acct, args, conv_id, prev_dir, p, cmd0, resume_prompt,
@@ -331,6 +406,28 @@ def _capture_dir(mgr: Manager, slot: int, gdir: Path) -> None:
         capture(slot, cred)
 
 
+def _hold(slot: int, pool: str, until: float, blob: str, pool_known: bool) -> str:
+    """Hold the failed quota pool — or the whole account when the model is unknown.
+
+    Returns the label of what was held, for the operator-facing message.
+    """
+    reason = "quota: Individual quota reached"
+    if agy.QUOTA_BASELINE_RE.search(blob):
+        reason = "quota: baseline model quota reached"
+
+    def fn(reg: Registry):
+        a = reg.get(slot)
+        if a is None:
+            return
+        if pool_known and pool != "all":
+            a.pool_limits = {**(a.pool_limits or {}), pool: until}
+            a.pool_reasons = {**(a.pool_reasons or {}), pool: reason}
+        else:
+            a.limited_until, a.limited_reason = until, reason
+    with_registry(fn)
+    return pool_label(pool) if pool_known else "model (unidentified)"
+
+
 def _flag(slot: int, limited: tuple[float, str] | None = None, quarantine: str | None = None) -> None:
     def fn(reg: Registry):
         a = reg.get(slot)
@@ -346,14 +443,16 @@ def _flag(slot: int, limited: tuple[float, str] | None = None, quarantine: str |
 def _next(mgr: Manager, strategy: str, pool: str, tried: set[int], after: int):
     """The next account, counting on from the one that just failed when rotating.
 
-    Quota readings for the candidates are refreshed first (when older than
-    usage.max_age_seconds), so "most quota left" is judged on current numbers.
+    Candidate quota readings are refreshed first (when older than usage.max_age_seconds), so
+    "most quota left" is judged on current numbers, and candidates are filtered by ``pool``:
+    an account held out for Claude/GPT stays eligible for a Gemini run.
     """
     def fn(reg):
         if strategy != "rotate":
             active = mgr.active(reg)
+            now = time.time()
             for a in reg.ordered():
-                if a.slot not in tried and a.rotatable():
+                if a.slot not in tried and a.rotatable(now, pool):
                     try:
                         mgr.refresh_usage(reg, a, active=active)
                     except Exception:
@@ -362,12 +461,23 @@ def _next(mgr: Manager, strategy: str, pool: str, tried: set[int], after: int):
     return with_registry(fn)
 
 
-def _exhausted(say) -> int:
+def _exhausted(say, mgr: Manager | None = None, pool: str = "all", tried: set[int] | None = None,
+               failed_pool: str | None = None) -> int:
+    """Stop with a refusal that names every account's reason, never a bare "all limited"."""
     reg = Registry.load()
-    now = time.time()
-    limited = [a.limited_until for a in reg.accounts if a.limited_until > now]
-    when = f"; the first one frees up at {time.strftime('%H:%M', time.localtime(min(limited)))}" if limited else ""
-    say("every account is limited, disabled or quarantined" + when)
+    if failed_pool and failed_pool != "all":
+        say(f"every eligible account is out of {pool_label(failed_pool)} quota; "
+            f"that pool cannot serve this request until one resets")
+    else:
+        say("every account is limited, disabled or quarantined; no account can serve this request right now")
+    if mgr is not None:
+        say(mgr.no_available_message(reg, pool, tried))
+    else:
+        now = time.time()
+        limited = [a.limited_until for a in reg.accounts if a.limited_until > now]
+        when = (f"; the first one frees up at "
+                f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(min(limited)))}") if limited else ""
+        say("every account is limited, disabled or quarantined" + when)
     return EXHAUSTED_EXIT
 
 

@@ -22,7 +22,7 @@ from antigravity_swap.manager import Manager, SwitchError, with_registry
 from antigravity_swap.settings import KEYS, PICK_STRATEGIES, POOLS, STRATEGIES, Settings
 from antigravity_swap.settings import strategy as strategy_name
 from antigravity_swap.store import Registry, StoreError, capture, load_cred, save_cred
-from antigravity_swap.usage import WINDOW_ORDER, windows
+from antigravity_swap.usage import WINDOW_ORDER, pool_label, windows
 
 SCHEMA = 1
 
@@ -71,8 +71,12 @@ def _flags(a, now) -> str:
         bits.append("disabled")
     if a.quarantined:
         bits.append(f"quarantined: {a.quarantine_reason}")
-    if a.is_limited(now):
-        bits.append(f"limited until {fmt_when(a.limited_until, now)}")
+    if a.limited_until > now:
+        bits.append(f"held until {fmt_when(a.limited_until, now)}"
+                    + (f" ({a.limited_reason})" if a.limited_reason else ""))
+    for pool, until in (a.pool_limits or {}).items():
+        if until > now:
+            bits.append(f"{pool_label(pool)} out until {fmt_when(until, now)}")
     return ", ".join(bits)
 
 
@@ -99,9 +103,14 @@ def account_row(mgr: Manager, a, active, now) -> dict:
         row["alias"] = a.alias
     if a.disabled:
         row["disabled"] = True
-    if a.is_limited(now):
+    if a.limited_until > now:
         row["limitedUntil"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(a.limited_until))
         row["limitedReason"] = a.limited_reason
+    pools_out = {p: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(until))
+                 for p, until in (a.pool_limits or {}).items() if until > now}
+    if pools_out:
+        row["poolLimits"] = pools_out
+        row["poolReasons"] = {p: r for p, r in (a.pool_reasons or {}).items() if p in pools_out}
     if a.quarantined:
         row["quarantined"] = True
         row["quarantineReason"] = a.quarantine_reason
@@ -349,8 +358,9 @@ def cmd_limit(mgr, args):
     if args.clear:
         def fn(a):
             a.limited_until, a.limited_reason = 0.0, None
+            a.pool_limits, a.pool_reasons = {}, {}
             a.quarantined, a.quarantine_reason = False, None
-        return _set_flag(args, fn, "Account {n} ({label}) is no longer held out.")
+        return _set_flag(args, fn, "Account {n} ({label}) is no longer held out (any pool).")
     secs = parse_duration(args.duration)
 
     def fn(a):

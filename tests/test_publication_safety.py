@@ -209,12 +209,8 @@ def test_conc_01_two_migrations_same_dst(tmp_path: Path):
     t1.join()
     t2.join()
 
-    # At least one thread must succeed; the other may lose the race (MigrationError is OK).
-    assert len(results) >= 1, f"Both threads failed — no winner: {errors}"
-    # The loser, if any, must have received a MigrationError/OSError, not a silent corruption.
-    for _src, err in errors:
-        assert "publication failed" in err or "no safe copy" in err or "FileNotFoundError" in err, \
-            f"Unexpected error type from losing thread: {err}"
+    assert len(errors) == 0, f"Concurrent migration raised unexpected errors: {errors}"
+    assert len(results) == 2, f"Expected both threads to complete safely: {results}"
 
     dconn = sqlite3.connect(dst)
     integrity = dconn.execute("PRAGMA integrity_check;").fetchone()[0]

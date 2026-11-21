@@ -21,9 +21,10 @@ from typing import TextIO
 
 from antigravity_swap import agy, convstore, paths, slotlock
 from antigravity_swap.failover import (PROMPT_FLAGS, ExecError, _capture_dir, _drop, _exhausted, _flag,
-                                       _flag_value, _next, pool_for, run_exec)
+                                       _flag_value, _hold, _next, plan, pool_for, run_exec)
 from antigravity_swap.manager import Manager, with_registry
 from antigravity_swap.store import Registry
+from antigravity_swap.usage import pool_label, pool_of_model
 
 # agy retries a quota error a couple of times ("attempt N failed ... retrying") and then gives
 # up with an executor error. Only that last line means the turn is dead, so only it triggers.
@@ -132,6 +133,17 @@ def restore_terminal() -> None:
         subprocess.run(["stty", "sane"], stdin=sys.stdin, capture_output=True)
 
 
+def _session_plan(mgr: Manager, agy_args: list[str] | None = None) -> dict:
+    """The pool an interactive session runs in, from the model agy itself is configured with."""
+    from antigravity_swap.failover import resolved_model
+    from antigravity_swap.usage import pool_of_model
+
+    model = resolved_model(agy_args or [], mgr, probe=False)
+    pool = pool_of_model(model)
+    return {"pool": pool or "all", "model": model,
+            "pool_known": pool is not None}
+
+
 def run_interactive(mgr: Manager, agy_args: list[str], target: str | None = None,
                     strategy: str | None = None, share_history: bool = False,
                     err: TextIO = sys.stderr, grace: float = 1.5) -> int:
@@ -139,10 +151,13 @@ def run_interactive(mgr: Manager, agy_args: list[str], target: str | None = None
         raise ExecError("do not pass --gemini_dir; aswap picks the directory for each account")
     if _flag_value(agy_args, PROMPT_FLAGS)[0] >= 0:
         return run_exec(mgr, agy_args, target=target, strategy=strategy, err=err)
-    strategy = strategy or mgr.settings.get("failover.strategy")
+    strategy = str(strategy or mgr.settings.get("failover.strategy") or "best")
     resume_prompt = mgr.settings.get("failover.resume_prompt")
     fallback = float(mgr.settings.get("failover.limit_fallback_hours")) * 3600
-    pool = pool_for(agy_args)
+    # An interactive session has no model flag: the pool is whatever agy's own settings say,
+    # so a Claude session is held out of Claude/GPT quota only and keeps its Gemini quota.
+    p = _session_plan(mgr, agy_args)
+    pool = p["pool"]
     cmd0 = mgr.agy_cmd()
     _, user_log, _ = _flag_value(agy_args, ("--log-file",))
     logdir = paths.data_dir() / "run-logs"
@@ -155,14 +170,24 @@ def run_interactive(mgr: Manager, agy_args: list[str], target: str | None = None
     def first(reg: Registry):
         active = mgr.active(reg)
         if target:
-            return reg.resolve(target), active
-        if active is not None and active.rotatable():
+            want = reg.resolve(target)
+            why = mgr.ineligible(want, pool)
+            if why is not None:
+                alt = mgr.pick(reg, strategy, pool, current=want)
+                if alt is not None:
+                    say(f"account {want.slot} ({want.label}) cannot serve a {pool_label(pool)} "
+                        f"session ({why}); starting on account {alt.slot} ({alt.label})")
+                    return alt, active
+                say(f"account {want.slot} ({want.label}) cannot serve a {pool_label(pool)} "
+                    f"session ({why})")
+            return want, active
+        if active is not None and active.rotatable(pool=pool):
             return active, active
         return mgr.pick(reg, strategy, pool, current=active), active
 
     acct, default_acct = with_registry(first)
     if acct is None:
-        return _exhausted(say)
+        return _exhausted(say, mgr, pool)
     max_hops = int(mgr.settings.get("failover.max_hops")) or len(Registry.load().accounts)
     tried: set[int] = set()
     hops = 0
@@ -236,10 +261,11 @@ def run_interactive(mgr: Manager, agy_args: list[str], target: str | None = None
                 watch.hit.clear()
                 secs = agy.parse_reset(watch.quota_line or "")
                 until = time.time() + (secs or fallback)
-                _flag(acct.slot, limited=(until, "quota: Individual quota reached" if secs else "quota error"))
+                where = _hold(acct.slot, pool, until, watch.quota_line or "", p["pool_known"])
                 nxt = _next(mgr, strategy, pool, tried, acct.slot)
                 if nxt is None or hops + 1 > max_hops:
-                    say(f"account {acct.slot} hit its quota and no other account is free; staying on it")
+                    say(f"account {acct.slot} ({acct.label}): {where} quota exhausted and no "
+                        f"other account is free; staying on it")
                     nxt = None
                     continue
                 time.sleep(grace)  # let the error show before the screen changes
@@ -261,8 +287,13 @@ def run_interactive(mgr: Manager, agy_args: list[str], target: str | None = None
             return rc
         restore_terminal()
         held = Registry.load().get(acct.slot)
-        until_txt = time.strftime("%H:%M", time.localtime(held.limited_until)) if held else "?"
-        say(f"account {acct.slot} ({acct.label}) hit its quota; held out until {until_txt}")
+        if held is None:
+            until_txt = "?"
+        elif p["pool_known"] and pool != "all":
+            until_txt = time.strftime("%H:%M", time.localtime(held.pool_hold(pool)))
+        else:
+            until_txt = time.strftime("%H:%M", time.localtime(held.limited_until))
+        say(f"account {acct.slot} ({acct.label}): {where} quota exhausted; held out until {until_txt}")
         say(f"continuing {'conversation ' + conv if conv else 'in a new session'} on account "
             f"{nxt.slot} ({nxt.label})")
         hops += 1

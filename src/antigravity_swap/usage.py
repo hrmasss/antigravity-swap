@@ -8,6 +8,10 @@ Buckets seen so far: ``gemini-5h`` and ``gemini-weekly`` (Gemini models), ``3p-5
 ``3p-weekly`` (Claude and GPT models through agy). agy reports what is *left*; aswap shows
 what is *used*, so the numbers read like claude-swap's.
 
+The two groups are independent: an account can be out of Claude/GPT quota for four days while
+its Gemini quota is untouched. Every hold in aswap is therefore per *pool* (``gemini`` /
+``3p``), not per account — see ``store.Account.pool_limited``.
+
 Not every limit is visible here. Accounts also hit an "Individual quota reached" ceiling
 that this endpoint does not report; ``aswap exec`` catches that one when it happens.
 """
@@ -15,6 +19,7 @@ that this endpoint does not report; ``aswap exec`` catches that one when it happ
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.error
 import urllib.request
@@ -25,12 +30,38 @@ from antigravity_swap.credentials import parse_rfc3339
 HOSTS = ("daily-cloudcode-pa.googleapis.com", "cloudcode-pa.googleapis.com")
 TIMEOUT = 15
 WINDOW_ORDER = ("gemini-5h", "gemini-weekly", "3p-5h", "3p-weekly")
+POOLS = ("gemini", "3p", "all")
+POOL_LABELS = {"gemini": "Gemini", "3p": "Claude/GPT", "all": "all-model"}
+
+# A model id (``agy models``) or a display name (settings.json's ``model``) -> quota pool.
+MODEL_3P_RE = re.compile(r"claude|gpt|o1|o3|o4|sonnet|opus", re.I)
+MODEL_GEMINI_RE = re.compile(r"gemini|imagen|veo|nano[- ]?banana", re.I)
 
 
 class UsageError(Exception):
     def __init__(self, kind: str, message: str):
         super().__init__(message)
         self.kind = kind  # "auth", "http-<code>", "network", "empty"
+
+
+def pool_of_model(model: str | None) -> str | None:
+    """The quota pool a model draws from, or None when the model cannot be identified.
+
+    None is a real answer, never a guess: a hold placed on the wrong pool either blocks a
+    request that would have worked or lets through one that cannot succeed.
+    """
+    m = str(model or "").strip()
+    if not m:
+        return None
+    if MODEL_3P_RE.search(m):
+        return "3p"
+    if MODEL_GEMINI_RE.search(m):
+        return "gemini"
+    return None
+
+
+def pool_label(pool: str | None) -> str:
+    return POOL_LABELS.get(pool or "", "model")
 
 
 def _call(host: str, path: str, body: dict, token: str) -> dict:

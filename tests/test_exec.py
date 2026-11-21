@@ -39,8 +39,11 @@ def test_failover_continues_conversation_on_next_account(env):
     assert out == "done by b@x.io after 2 turn(s)\n"  # the turn from a@ came along
     reg = Registry.load()
     a = reg.get(1)
-    assert a.is_limited()
-    assert abs(a.limited_until - (time.time() + 3723)) < 30  # "Resets in 1h2m3s"
+    # A quota error holds the pool the run used, not the whole account: Gemini and Claude/GPT
+    # are independent, so an account out of one pool still serves the other.
+    assert a.pool_limited("gemini")
+    assert abs(a.pool_hold("gemini") - (time.time() + 3723)) < 30  # "Resets in 1h2m3s"
+    assert a.limited_until == 0.0
     runs = [c for c in env.calls() if c["args"] and c["args"][0] != "models"]
     assert runs[0]["email"] == "a@x.io" and "build it" in runs[0]["args"]
     assert runs[1]["email"] == "b@x.io" and "--conversation" in runs[1]["args"]
@@ -62,7 +65,9 @@ def test_failover_all_exhausted(env):
     add_accounts(env, "a@x.io", "b@x.io")
     rc, out, err = run(env, ["-p", "x"], strategy="rotate")
     assert rc == EXHAUSTED_EXIT
-    assert "every account is limited" in err
+    # The refusal must name the pool and each account's reason, not just "all limited".
+    assert "no account can serve a Gemini request" in err
+    assert "a@x.io" in err and "b@x.io" in err
     reg = Registry.load()
     assert all(a.is_limited() for a in reg.accounts)
 

@@ -1,7 +1,12 @@
 """A stand-in for the agy binary, driven by a JSON plan file.
 
-FAKE_AGY_PLAN points at {"<email>": "ok" | "quota" | "dead" | "verify"}. Every call is
-appended to FAKE_AGY_LOG as one JSON line.
+FAKE_AGY_PLAN points at {"<email>": "ok" | "quota" | "quota3p" | "forbidden" | "flaky" | "dead" | "verify"}.
+Every call is appended to FAKE_AGY_LOG as one JSON line.
+
+``quota`` reproduces the CLI's quota error for any model; ``quota3p`` adds the
+"Baseline model quota reached" wording the UI shows when a *model group* is out;
+``forbidden`` is the generic 403 that must never rotate or quarantine; ``flaky`` fails the
+first turn per account with a 503 and then succeeds (bounded-retry proof).
 """
 
 import base64
@@ -74,11 +79,29 @@ def main(argv):
     db = cdir / f"{conv}.db"
     with open(db, "a") as fh:
         fh.write(f"turn by {email}\n")
-    if behaviour == "quota":
+    if behaviour in ("quota", "quota3p"):
         print("Error: RESOURCE_EXHAUSTED (code 429): Individual quota reached. Please upgrade your "
               "subscription to increase your limits. Resets in 1h2m3s.", file=sys.stderr)
+        if behaviour == "quota3p":
+            # The exact wording the Antigravity UI shows when a model group is out; the CLI
+            # prints it after the executor error, and it names no model.
+            print("Baseline model quota reached. Claude and GPT models remain unavailable until "
+                  "the weekly limit resets.", file=sys.stderr)
         print(json.dumps({"conversation_id": conv, "status": "ERROR", "response": ""}))
         return 1
+    if behaviour == "forbidden":
+        print("Error: PERMISSION_DENIED (code 403): permission denied while resolving the project",
+              file=sys.stderr)
+        print(json.dumps({"conversation_id": conv, "status": "ERROR", "response": ""}))
+        return 1
+    if behaviour == "flaky":
+        # One transient 503 per account, then success: proves bounded retry, never rotation.
+        marker = cdir / f".flaky-{email}"
+        if not marker.exists():
+            marker.write_text("1")
+            print("Error: 503 UNAVAILABLE: model backend overloaded, please retry", file=sys.stderr)
+            print(json.dumps({"conversation_id": conv, "status": "ERROR", "response": ""}))
+            return 1
     turns = db.read_text().count("turn by")
     print(json.dumps({"conversation_id": conv, "status": "SUCCESS",
                       "response": f"done by {email} after {turns} turn(s)\n"}))

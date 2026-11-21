@@ -42,7 +42,10 @@ def test_session_moves_to_next_account_and_continues(env, capfd):
     assert "session by b@x.io" in out and "turns=2" in out  # same conversation, one turn from each account
     assert "prompt='Please continue where you left off.'" in out
     a = Registry.load().get(1)
-    assert a.is_limited() and abs(a.limited_until - (time.time() + 1800)) < 60
+    assert a.is_limited()
+    assert a.pool_limited("gemini")
+    assert abs(a.pool_hold("gemini") - (time.time() + 1800)) < 60
+    assert a.limited_until == 0.0
     assert "held out until" in err and "continuing conversation" in err
 
 

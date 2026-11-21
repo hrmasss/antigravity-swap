@@ -38,21 +38,43 @@ TRANSIENT_RE = re.compile(r"\b(?:50[0-4])\b|UNAVAILABLE|INTERNAL\b|Bad gateway|o
 NON_RETRYABLE_RE = re.compile(r"\b(?:400|404|405|409|410|411|413|414|415|422)\b|INVALID_ARGUMENT"
                               r"|FAILED_PRECONDITION|not found", re.I)
 VERIFY_RE = re.compile(r"Verify your account|not eligible for Antigravity", re.I)
+QUOTA_TEXT_RE = re.compile(r"RESOURCE_EXHAUSTED|Individual quota reached|Baseline model quota reached"
+                           r"|\bcode 429\b", re.I)
 
 
 def retryable(kind: str) -> bool:
     return kind in ("transient", "auth")
 
 
+def investigate_hints(text: str, slot: int | None = None, label: str | None = None) -> list[str]:
+    """Operator-facing notes for an error that must *not* trigger rotation.
+
+    A generic 403 is the case this exists for: the brief requires that it neither swaps
+    accounts nor quarantines one, because the same 403 also comes from the quota RPC itself
+    (non-CLI User-Agent) and from a stale project id. The run stops; these lines say why and
+    what to check, so "stopped" does not read as "broken".
+    """
+    who = f"account {slot} ({label})" if slot is not None else "the account"
+    if re.search(r"\b403\b|\bPERMISSION_DENIED\b", text or ""):
+        if VERIFY_RE.search(text or ""):
+            return [f"{who}: 403 asks for account verification — quarantine and re-add that login"]
+        return [f"{who}: generic 403 — not treated as exhaustion: the account is NOT swapped or "
+                f"quarantined. Check the quota RPC's User-Agent and the cached project id, then retry"]
+    return []
+
+
 def classify_error(text: str) -> str:
     """One of ``auth`` | ``transient`` | ``non_retryable`` | ``other``.
 
     Runs *after* ``agy.classify_failure``: quota/signin/verify keep their existing handling.
+    Quota text is checked first and always lands in ``other``: an exhaustion message must
+    never enter the retry loop, even when the same blob also says "unavailable" (agy's
+    "models remain unavailable until the weekly limit resets" wording does exactly that).
     """
     if not text:
         return "other"
-    if VERIFY_RE.search(text):
-        return "other"  # handled as 'verify' upstream; never a retry candidate
+    if QUOTA_TEXT_RE.search(text) or VERIFY_RE.search(text):
+        return "other"  # handled as quota/verify upstream; never a retry candidate
     if NON_RETRYABLE_RE.search(text):
         return "non_retryable"
     if AUTH_RE.search(text):
