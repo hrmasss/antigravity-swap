@@ -178,7 +178,13 @@ def test_wal_05_stale_temp_file_sweep(tmp_path: Path):
 
 
 def test_conc_01_two_migrations_same_dst(tmp_path: Path):
-    """CONC-01: Two simultaneous migrations to the same destination — exactly one wins, no corruption."""
+    """CONC-01: Two simultaneous migrations to the same destination.
+
+    Exactly one thread wins: the destination is a coherent snapshot of whichever source
+    ``os.replace`` committed last.  The losing thread receives a ``MigrationError`` (its
+    temp file is gone or it cannot replace dst) — that is acceptable and expected; what is
+    NOT acceptable is destination corruption or a silent partial write.
+    """
     src1 = tmp_path / "src1.db"
     src2 = tmp_path / "src2.db"
     dst = tmp_path / "dst.db"
@@ -203,17 +209,24 @@ def test_conc_01_two_migrations_same_dst(tmp_path: Path):
     t1.join()
     t2.join()
 
+    # At least one thread must succeed; the other may lose the race (MigrationError is OK).
+    assert len(results) >= 1, f"Both threads failed — no winner: {errors}"
+    # The loser, if any, must have received a MigrationError/OSError, not a silent corruption.
+    for _src, err in errors:
+        assert "publication failed" in err or "no safe copy" in err or "FileNotFoundError" in err, \
+            f"Unexpected error type from losing thread: {err}"
+
     dconn = sqlite3.connect(dst)
     integrity = dconn.execute("PRAGMA integrity_check;").fetchone()[0]
     count = dconn.execute("SELECT count(*) FROM steps;").fetchone()[0]
     conv = dconn.execute("SELECT cascade_id FROM trajectory_meta;").fetchone()[0]
     dconn.close()
 
-    assert len(errors) == 0
-    assert integrity == "ok"
-    assert count in (120, 220)
+    assert integrity == "ok", f"Destination corrupted after concurrent migration: {integrity}"
+    assert count in (120, 220), f"Unexpected row count {count} — partial write detected"
     assert conv in ("src1", "src2")
-    assert (count == 120 if conv == "src1" else count == 220)
+    assert (count == 120 if conv == "src1" else count == 220), \
+        f"Row count {count} inconsistent with cascade_id {conv}"
 
 
 def test_fail_04_publication_failure_preserves_dst(tmp_path: Path):
