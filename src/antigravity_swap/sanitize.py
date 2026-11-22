@@ -37,10 +37,10 @@ REWRITES: tuple[tuple[re.Pattern[str], str | object], ...] = (
     (re.compile(r"You are a Claude agent, built on Anthropic's Claude Agent SDK\.", re.I), ""),
     (
         re.compile(
-            r"(?:You are\s+)?Hermes(?:\s+Agent)?[^.\n]*?\bNous\s+Research\b[^.\n]*\.?"
-            r"|(?:You are\s+)?Hermes(?:\s+Agent)?\s*[,:;\u2014\u2013-]?[^.\n]*?\b(?:AI\s+assistant|AI\s+agent)\b[^.\n]*\.?"
-            r"|(?:You are\s+)?\bHermes\s+Agent\b\s*\.?",
-            re.I,
+            r"(?:^|(?<=[.!?]\s))(?:You are\s+)?Hermes(?:\s+Agent)?[^.\n]*?\bNous\s+Research\b[^.\n]*\.?"
+            r"|(?:^|(?<=[.!?]\s))(?:You are\s+)?Hermes(?:\s+Agent)?\s*[,:;\u2014\u2013-]?[^.\n]*?\b(?:AI\s+assistant|AI\s+agent)\b[^.\n]*\.?"
+            r"|(?:^|(?<=[.!?]\s))(?:You are\s+)?Hermes\s+Agent\b(?=\s*(?:[.!?\n]|$))",
+            re.I | re.M,
         ),
         REPLACEMENT,
     ),

@@ -142,3 +142,19 @@ def test_interactive_resume_args_sanitises_the_continuation():
 def test_plan_leaves_an_ordinary_prompt_alone():
     p = plan(["-p", "fix the failing tests"])
     assert "fix the failing tests" in p["args"]
+
+
+# --- over-match guards (same bug class as 9router #5650) ---------------------------
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The Hermes rocket launched successfully.",
+        "Project Hermes Agent migration is scheduled for Q3.",
+        "Nous Research publishes open models. Hermes Agent is one of them.",
+        "Use the hermes-agent CLI to deploy.",
+        "Hermes Agent's documentation lives at docs/hermes-agent.md",
+    ],
+)
+def test_does_not_rewrite_unrelated_prose(text):
+    assert sanitize(text) == text, f"over-matched: {sanitize(text)}"
