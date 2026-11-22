@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TextIO
 
 from antigravity_swap import agy, convstore, errors, slotlock
+from antigravity_swap.sanitize import sanitize_argv
 from antigravity_swap.credentials import FileBackend
 from antigravity_swap.manager import Manager, SwitchError, with_registry
 from antigravity_swap.store import Registry, capture
@@ -104,6 +105,10 @@ def plan(args: list[str], mgr: Manager | None = None) -> dict:
     _, fmt, _ = _flag_value(args, ("--output-format",))
     mode = fmt or "text"
     run_args = list(args) if fmt else list(args) + ["--output-format", "json"]
+    # agy talks to Google directly, so 9Router's prompt sanitizer never runs on this
+    # path. Apply the same rewrites here: a filtered client identity comes back as a
+    # detail-free 429 RESOURCE_EXHAUSTED and is otherwise indistinguishable from quota.
+    run_args = sanitize_argv(run_args)
     model = resolved_model(args, mgr)
     pool = pool_of_model(model)
     return {"args": run_args, "mode": mode, "pool": pool or "all", "model": model,
@@ -118,7 +123,8 @@ def resume_args(args: list[str], conv_id: str, prompt: str) -> list[str]:
     base = _drop(args, PROMPT_FLAGS)
     base = _drop(base, ("--conversation",))
     base = _drop(base, ("-c", "--continue"), takes_value=False)
-    return base + ["--conversation", conv_id, "-p", prompt]
+    # Same reason as plan(): the resumed prompt must be sanitised too.
+    return sanitize_argv(base + ["--conversation", conv_id, "-p", prompt])
 
 
 def last_json(text: str) -> dict | None:
