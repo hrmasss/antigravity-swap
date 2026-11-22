@@ -23,6 +23,7 @@ from antigravity_swap import agy, paths
 from antigravity_swap.failover import (PROMPT_FLAGS, ExecError, _capture_dir, _drop, _exhausted, _flag,
                                        _flag_value, _next, pool_for, run_exec)
 from antigravity_swap.manager import Manager, with_registry
+from antigravity_swap.sanitize import sanitize_argv
 from antigravity_swap.store import Registry
 
 # agy retries a quota error a couple of times ("attempt N failed ... retrying") and then gives
@@ -78,7 +79,11 @@ def resume_args(args: list[str], conv_id: str, prompt: str) -> list[str]:
     base = _drop(args, INTERACTIVE_PROMPT_FLAGS)
     base = _drop(base, ("--conversation",))
     base = _drop(base, ("-c", "--continue"), takes_value=False)
-    return base + ["--conversation", conv_id, "-i", prompt]
+    # The resumed prompt goes upstream verbatim, so it needs the same identity
+    # rewrites as the print-mode path -- otherwise a failover restarts the
+    # conversation with an unsanitised prompt and re-triggers the filtered 429.
+    return sanitize_argv(base + ["--conversation", conv_id, "-i", prompt],
+                         print_flags=INTERACTIVE_PROMPT_FLAGS)
 
 
 def _children(pid: int) -> list[int]:

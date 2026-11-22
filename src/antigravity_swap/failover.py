@@ -19,6 +19,7 @@ from typing import TextIO
 from antigravity_swap import agy
 from antigravity_swap.credentials import FileBackend
 from antigravity_swap.manager import Manager, SwitchError, with_registry
+from antigravity_swap.sanitize import sanitize_argv
 from antigravity_swap.store import Registry, capture
 
 PROMPT_FLAGS = ("-p", "--print", "--prompt")
@@ -73,6 +74,12 @@ def plan(args: list[str]) -> dict:
     _, fmt, _ = _flag_value(args, ("--output-format",))
     mode = fmt or "text"
     run_args = list(args) if fmt else list(args) + ["--output-format", "json"]
+    # agy calls daily-cloudcode-pa.googleapis.com directly, so it never passes
+    # through 9Router and that gateway's prompt sanitizer does not apply here.
+    # Apply the same rewrites: a filtered client identity comes back as a
+    # detail-free 429 RESOURCE_EXHAUSTED that is otherwise indistinguishable
+    # from exhausted quota, so a prompt problem burns an account cooldown.
+    run_args = sanitize_argv(run_args)
     return {"args": run_args, "mode": mode, "pool": pool_for(args)}
 
 
@@ -80,7 +87,9 @@ def resume_args(args: list[str], conv_id: str, prompt: str) -> list[str]:
     base = _drop(args, PROMPT_FLAGS)
     base = _drop(base, ("--conversation",))
     base = _drop(base, ("-c", "--continue"), takes_value=False)
-    return base + ["--conversation", conv_id, "-p", prompt]
+    # Same reason as plan(): continuations must be sanitised too, otherwise only
+    # the first prompt of a conversation is protected.
+    return sanitize_argv(base + ["--conversation", conv_id, "-p", prompt])
 
 
 def last_json(text: str) -> dict | None:
