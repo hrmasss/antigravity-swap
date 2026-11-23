@@ -269,3 +269,33 @@ def test_renew_inactive_by_swap_on_global_login(env, monkeypatch):
     assert seen == ["renewed-b@x.io"]
     assert load_cred(2).access_token == "renewed-b@x.io"
     assert env.backend.read().identity().email == "a@x.io"  # default login is back
+
+
+def test_quota_user_agent_is_agys_own(monkeypatch):
+    """The quota summary carries the Gemini group only for agy's own client prefix."""
+    import json as _json
+    from antigravity_swap import usage
+
+    seen = {}
+
+    class _Resp:
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return _json.dumps(self.body).encode()
+
+    def fake_urlopen(req, timeout=None):
+        seen["ua"] = req.get_header("User-agent")
+        return _Resp({"cloudaicompanionProject": "p"} if "loadCodeAssist" in req.full_url else {"groups": []})
+
+    monkeypatch.setattr(usage.urllib.request, "urlopen", fake_urlopen)
+    usage.fetch("tok")
+    assert seen["ua"].startswith("antigravity/cli/")
+    assert seen["ua"].split("/", 2)[2][:1].isdigit()

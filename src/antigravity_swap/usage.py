@@ -27,6 +27,12 @@ TIMEOUT = 15
 WINDOW_ORDER = ("gemini-5h", "gemini-weekly", "3p-5h", "3p-weekly")
 
 
+# The server shapes the quota summary by client. Any User-Agent other than agy's own
+# "antigravity/cli/<version>" gets only the Claude and GPT group, with no Gemini 5h or
+# weekly buckets. The version after the prefix is required; its value is not checked.
+USER_AGENT = f"antigravity/cli/1.5.14 (antigravity-swap/{__version__})"
+
+
 class UsageError(Exception):
     def __init__(self, kind: str, message: str):
         super().__init__(message)
@@ -41,7 +47,7 @@ def _call(host: str, path: str, body: dict, token: str) -> dict:
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
-            "User-Agent": f"antigravity-swap/{__version__}",
+            "User-Agent": USER_AGENT,
         },
     )
     with urllib.request.urlopen(req, timeout=TIMEOUT) as r:
